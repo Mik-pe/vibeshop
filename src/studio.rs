@@ -258,32 +258,32 @@ impl Studio {
         if text_editor_has_focus(ctx) || self.pending.is_some() || self.error.is_some() {
             return;
         }
-        let command = ctx.input(|i| i.modifiers.command);
-        let shift = ctx.input(|i| i.modifiers.shift);
-        if command {
-            if ctx.input(|i| i.key_pressed(egui::Key::O)) {
-                self.request(Action::Open(None, shift), ctx);
-            }
-            if ctx.input(|i| i.key_pressed(egui::Key::S)) {
-                self.export(ctx);
-            }
-            if ctx.input(|i| i.key_pressed(egui::Key::Z)) {
-                if shift {
-                    self.editor.redo();
-                } else {
-                    self.editor.undo();
-                }
-            }
-        } else {
-            if ctx.input(|i| i.key_pressed(egui::Key::H)) {
-                self.tool = Tool::Hand;
-            }
-            if ctx.input(|i| i.key_pressed(egui::Key::V)) {
-                self.tool = Tool::Move;
-            }
-            if ctx.input(|i| i.key_pressed(egui::Key::F)) {
-                self.fit = true;
-            }
+        let command = egui::Modifiers::COMMAND;
+        let command_shift = egui::Modifiers {
+            shift: true,
+            ..command
+        };
+        if shortcut(ctx, command_shift, egui::Key::O) {
+            self.request(Action::Open(None, true), ctx);
+        } else if shortcut(ctx, command, egui::Key::O) {
+            self.request(Action::Open(None, false), ctx);
+        }
+        if shortcut(ctx, command, egui::Key::S) {
+            self.export(ctx);
+        }
+        if shortcut(ctx, command_shift, egui::Key::Z) {
+            self.editor.redo();
+        } else if shortcut(ctx, command, egui::Key::Z) {
+            self.editor.undo();
+        }
+        if shortcut(ctx, egui::Modifiers::NONE, egui::Key::H) {
+            self.tool = Tool::Hand;
+        }
+        if shortcut(ctx, egui::Modifiers::NONE, egui::Key::V) {
+            self.tool = Tool::Move;
+        }
+        if shortcut(ctx, egui::Modifiers::NONE, egui::Key::F) {
+            self.fit = true;
         }
     }
     fn top_bar(&mut self, ctx: &egui::Context) {
@@ -666,6 +666,9 @@ impl eframe::App for Studio {
         self.dialogs(ctx);
     }
 }
+fn shortcut(ctx: &egui::Context, modifiers: egui::Modifiers, key: egui::Key) -> bool {
+    ctx.input_mut(|input| input.consume_key(modifiers, key))
+}
 fn text_editor_has_focus(ctx: &egui::Context) -> bool {
     // Canvas and buttons can own keyboard focus without being text editors.
     ctx.memory(|memory| memory.focused())
@@ -748,5 +751,23 @@ mod tests {
         assert!(text_editor_has_focus(&ctx));
         ctx.memory_mut(|memory| memory.surrender_focus(text));
         assert!(!text_editor_has_focus(&ctx));
+    }
+    #[test]
+    fn a_released_modifier_does_not_erase_the_key_event_shortcut() {
+        let ctx = egui::Context::default();
+        ctx.begin_pass(egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Z,
+                physical_key: Some(egui::Key::Z),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::COMMAND,
+            }],
+            ..Default::default()
+        });
+        assert!(!ctx.input(|input| input.modifiers.command));
+        assert!(shortcut(&ctx, egui::Modifiers::COMMAND, egui::Key::Z));
+        assert!(!shortcut(&ctx, egui::Modifiers::COMMAND, egui::Key::Z));
+        let _ = ctx.end_pass();
     }
 }
