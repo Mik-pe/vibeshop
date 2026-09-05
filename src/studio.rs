@@ -255,7 +255,7 @@ impl Studio {
         }
     }
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.wants_keyboard_input() || self.pending.is_some() || self.error.is_some() {
+        if text_editor_has_focus(ctx) || self.pending.is_some() || self.error.is_some() {
             return;
         }
         let command = ctx.input(|i| i.modifiers.command);
@@ -666,6 +666,11 @@ impl eframe::App for Studio {
         self.dialogs(ctx);
     }
 }
+fn text_editor_has_focus(ctx: &egui::Context) -> bool {
+    // Canvas and buttons can own keyboard focus without being text editors.
+    ctx.memory(|memory| memory.focused())
+        .is_some_and(|id| egui::TextEdit::load_state(ctx, id).is_some())
+}
 fn png_destination(path: &std::path::Path) -> Result<PathBuf> {
     anyhow::ensure!(
         path.extension()
@@ -728,5 +733,20 @@ mod tests {
         let anchor = egui::vec2(100.0, 82.0);
         let next = zoom_pan(pan, anchor, 2.5);
         assert!(((anchor - pan) - (anchor - next) / 2.5).length() < 0.0001);
+    }
+    #[test]
+    fn only_text_focus_suppresses_editor_shortcuts() {
+        let ctx = egui::Context::default();
+        assert!(!text_editor_has_focus(&ctx));
+        let canvas = egui::Id::new("canvas");
+        ctx.memory_mut(|memory| memory.request_focus(canvas));
+        assert!(ctx.wants_keyboard_input());
+        assert!(!text_editor_has_focus(&ctx));
+        let text = egui::Id::new("numeric-text-entry");
+        egui::TextEdit::store_state(&ctx, text, Default::default());
+        ctx.memory_mut(|memory| memory.request_focus(text));
+        assert!(text_editor_has_focus(&ctx));
+        ctx.memory_mut(|memory| memory.surrender_focus(text));
+        assert!(!text_editor_has_focus(&ctx));
     }
 }
