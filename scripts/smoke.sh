@@ -61,10 +61,17 @@ capture redone
 [[ "$(canvas_hash redone)" == "$moved" ]] || { echo 'Redo did not restore the moved layer' >&2; exit 1; }
 xdotool key --clearmodifiers ctrl+z
 sleep 0.3
-xdotool mousemove --window "$window" 1292 268 click 1
+xdotool mousemove --sync --window "$window" 1292 268
+sleep 0.1
+xdotool mousedown 1
+sleep 0.15
+xdotool mouseup 1
 capture exposure
 [[ "$(canvas_hash exposure)" != "$original" ]] || { echo 'Exposure control did not change rendered pixels' >&2; exit 1; }
-xdotool mousemove --window "$window" 600 400 click 1
+xdotool mousemove --sync --window "$window" 600 400
+xdotool mousedown 1
+sleep 0.15
+xdotool mouseup 1
 xdotool key --clearmodifiers ctrl+z
 capture restored
 [[ "$(canvas_hash restored)" == "$original" ]] || { echo 'Undo did not restore exposure' >&2; exit 1; }
