@@ -1,52 +1,70 @@
 name: CI
 on:
   push:
-    branches: [main]
-  pull_request:
+    branches: [main, 'agent/**']
+  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 jobs:
   verify:
-    runs-on: ubuntu-24.04
+    if: github.repository == 'Mik-pe/vibeshop' && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+    runs-on: [self-hosted, Linux, X64, vibeshop]
     timeout-minutes: 30
     env:
       CARGO_TERM_COLOR: always
       WGPU_BACKEND: vulkan
-      XDG_RUNTIME_DIR: /tmp/vibeshop-runtime
+      XDG_RUNTIME_DIR: ${{ runner.temp }}/vibeshop-runtime-${{ github.run_id }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: System dependencies
+      - name: Prepare isolated test evidence
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev libvulkan1 mesa-vulkan-drivers xvfb xdotool imagemagick
-          mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
-      - name: Toolchain
-        run: rustup show
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          cache-on-failure: true
-      - name: Compile and test real GPU pixels
+          set -euo pipefail
+          mkdir -p "$XDG_RUNTIME_DIR" artifacts
+          chmod 700 "$XDG_RUNTIME_DIR"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          printf 'Runner: %s\nCommit: %s\n' "$RUNNER_NAME" "$GITHUB_SHA" | tee artifacts/run.txt
+          git archive --format=zip --output=artifacts/source.zip HEAD
+      - name: Check runner prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tool in cargo rustup pkg-config xvfb-run xdotool import convert; do
+            command -v "$tool" || { echo "Missing $tool. See docs/RUNNER.md. CI never installs system packages or uses sudo."; exit 1; }
+          done
+          rustup show
+          pkg-config --exists xkbcommon wayland-client
+      - name: Compile and test actual GPU pixels
+        shell: bash
         run: cargo test --locked --all-targets -- --nocapture
       - name: Lints
         if: ${{ !cancelled() }}
+        shell: bash
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Formatting
         if: ${{ !cancelled() }}
+        shell: bash
         run: cargo fmt --all -- --check
-      - name: Cross-machine agent coordination
+      - name: Agent coordination
         if: ${{ !cancelled() }}
+        shell: bash
         run: scripts/test-leases.sh
-      - name: Launch actual editor
+      - name: Native editing journey
         if: ${{ !cancelled() }}
+        shell: bash
         run: scripts/smoke.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: editor-evidence
           path: artifacts/
-          if-no-files-found: warn
+          retention-days: 7
+      - name: Remove this run's temporary runtime directory
+        if: always()
+        shell: bash
+        run: rmdir "$XDG_RUNTIME_DIR" || true
