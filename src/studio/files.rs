@@ -50,7 +50,10 @@ impl Studio {
             Action::Replace(loaded) => self.replace_loaded(loaded),
             Action::New([width, height]) => match Document::blank(width, height) {
                 Ok(document) => {
-                    self.replace_loaded(Loaded { document, path: None });
+                    self.replace_loaded(Loaded {
+                        document,
+                        path: None,
+                    });
                     self.editor.mark_unsaved();
                     self.status = "New transparent canvas · add an image layer to start".into();
                 }
@@ -65,7 +68,8 @@ impl Studio {
                         let dialog = if add {
                             dialog.add_filter("Images", &["png", "jpg", "jpeg"])
                         } else {
-                            dialog.add_filter("Projects and images", &["vibe", "png", "jpg", "jpeg"])
+                            dialog
+                                .add_filter("Projects and images", &["vibe", "png", "jpg", "jpeg"])
                         };
                         pollster::block_on(dialog.pick_file()).map(|file| file.path().to_path_buf())
                     });
@@ -85,31 +89,58 @@ impl Studio {
         self.editor.finish_edit();
         let document = self.editor.document.clone();
         let state = self.editor.state_id();
-        let current_path = if save_as { None } else { self.project_path.clone() };
+        let current_path = if save_as {
+            None
+        } else {
+            self.project_path.clone()
+        };
         self.status = "Saving editable project…".into();
         self.start_job(ctx, move || {
             let path = current_path.or_else(|| {
-                pollster::block_on(rfd::AsyncFileDialog::new().add_filter("Vibeshop project", &["vibe"]).set_file_name("Untitled.vibe").save_file())
-                    .map(|file| file.path().to_path_buf())
+                pollster::block_on(
+                    rfd::AsyncFileDialog::new()
+                        .add_filter("Vibeshop project", &["vibe"])
+                        .set_file_name("Untitled.vibe")
+                        .save_file(),
+                )
+                .map(|file| file.path().to_path_buf())
             });
-            let Some(path) = path else { return Ok(Job::Cancelled); };
-            ensure!(has_extension(&path, "vibe"), "Choose a filename ending in .vibe. The selected path will not be silently changed.");
+            let Some(path) = path else {
+                return Ok(Job::Cancelled);
+            };
+            ensure!(
+                has_extension(&path, "vibe"),
+                "Choose a filename ending in .vibe. The selected path will not be silently changed."
+            );
             project::save(&path, &document)?;
             Ok(Job::Saved(path, state))
         });
     }
 
     pub(super) fn export(&mut self, ctx: &egui::Context) {
-        if self.job.is_some() || self.pending.is_some() || self.error.is_some() || self.new_size.is_some() || !self.render() {
+        if self.job.is_some()
+            || self.pending.is_some()
+            || self.error.is_some()
+            || self.new_size.is_some()
+            || !self.render()
+        {
             return;
         }
         let snapshot = match self.gpu.readback() {
             Ok(snapshot) => snapshot,
-            Err(error) => { self.error = Some(error.to_string()); return; }
+            Err(error) => {
+                self.error = Some(error.to_string());
+                return;
+            }
         };
         self.status = "Exporting flattened PNG…".into();
         self.start_job(ctx, move || {
-            let Some(file) = pollster::block_on(rfd::AsyncFileDialog::new().add_filter("PNG", &["png"]).set_file_name("vibeshop.png").save_file()) else {
+            let Some(file) = pollster::block_on(
+                rfd::AsyncFileDialog::new()
+                    .add_filter("PNG", &["png"])
+                    .set_file_name("vibeshop.png")
+                    .save_file(),
+            ) else {
                 return Ok(Job::Cancelled);
             };
             let path = png_destination(file.path())?;
@@ -120,7 +151,11 @@ impl Studio {
         });
     }
 
-    fn start_job(&mut self, ctx: &egui::Context, work: impl FnOnce() -> Result<Job> + Send + 'static) {
+    fn start_job(
+        &mut self,
+        ctx: &egui::Context,
+        work: impl FnOnce() -> Result<Job> + Send + 'static,
+    ) {
         let (tx, rx) = mpsc::sync_channel(1);
         self.job = Some(rx);
         let ctx = ctx.clone();
@@ -136,7 +171,9 @@ impl Studio {
     pub(super) fn poll_job(&mut self, ctx: &egui::Context) {
         let result = match self.job.as_ref().map(|job| job.try_recv()) {
             Some(Ok(result)) => result,
-            Some(Err(TryRecvError::Disconnected)) => Err(anyhow::anyhow!("File worker disconnected")),
+            Some(Err(TryRecvError::Disconnected)) => {
+                Err(anyhow::anyhow!("File worker disconnected"))
+            }
             _ => return,
         };
         self.job = None;
@@ -144,18 +181,34 @@ impl Studio {
             Ok(Job::Opened(mut loaded, add, revision)) => {
                 let limit = self.gpu.device.limits().max_texture_dimension_2d;
                 let document = &loaded.document;
-                if document.width > limit || document.height > limit || document.layers.iter().any(|layer| layer.source.width > limit || layer.source.height > limit) {
-                    self.error = Some(format!("Project exceeds this GPU's {limit}px texture limit"));
+                if document.width > limit
+                    || document.height > limit
+                    || document
+                        .layers
+                        .iter()
+                        .any(|layer| layer.source.width > limit || layer.source.height > limit)
+                {
+                    self.error = Some(format!(
+                        "Project exceeds this GPU's {limit}px texture limit"
+                    ));
                     return;
                 }
                 if add {
-                    match loaded.document.layers.pop().context("The imported image has no layer").and_then(|layer| self.editor.add_layer(layer)) {
+                    match loaded
+                        .document
+                        .layers
+                        .pop()
+                        .context("The imported image has no layer")
+                        .and_then(|layer| self.editor.add_layer(layer))
+                    {
                         Ok(()) => self.status = "Image added as an editable layer".into(),
                         Err(error) => self.error = Some(error.to_string()),
                     }
                 } else if self.editor.revision != revision {
                     self.pending = Some(Action::Replace(loaded));
-                    self.status = "Your work changed while opening · save or discard before replacing it".into();
+                    self.status =
+                        "Your work changed while opening · save or discard before replacing it"
+                            .into();
                 } else {
                     self.replace_loaded(loaded);
                 }
@@ -172,8 +225,15 @@ impl Studio {
                     }
                 }
             }
-            Ok(Job::Exported(path)) => self.status = format!("Exported {} · project save state is unchanged", path.file_name().unwrap_or_default().to_string_lossy()),
-            Ok(Job::Cancelled) => self.status = "File operation cancelled · your work is unchanged".into(),
+            Ok(Job::Exported(path)) => {
+                self.status = format!(
+                    "Exported {} · project save state is unchanged",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                )
+            }
+            Ok(Job::Cancelled) => {
+                self.status = "File operation cancelled · your work is unchanged".into()
+            }
             Err(error) => {
                 self.status = "File operation failed · your work remains open".into();
                 self.error = Some(format!("{error:#}"));
@@ -186,7 +246,12 @@ impl Studio {
         self.project_path = loaded.path;
         self.fit = true;
         self.move_start = None;
-        self.status = if self.project_path.is_some() { "Editable project opened locally" } else { "Image opened locally · save a project to keep your edits" }.into();
+        self.status = if self.project_path.is_some() {
+            "Editable project opened locally"
+        } else {
+            "Image opened locally · save a project to keep your edits"
+        }
+        .into();
     }
 
     pub(super) fn dialogs(&mut self, ctx: &egui::Context) {
@@ -202,15 +267,23 @@ impl Studio {
                     ui.add(egui::DragValue::new(&mut size[1]).range(1..=8192));
                 });
                 let valid = vibeshop::document::validate_size(size[0], size[1]);
-                if let Err(error) = &valid { ui.label(error.to_string()); }
+                if let Err(error) = &valid {
+                    ui.label(error.to_string());
+                }
                 ui.horizontal(|ui| {
-                    create = ui.add_enabled(valid.is_ok(), egui::Button::new("Create canvas")).clicked();
+                    create = ui
+                        .add_enabled(valid.is_ok(), egui::Button::new("Create canvas"))
+                        .clicked();
                     cancel = ui.button("Cancel").clicked();
                 });
             });
             self.new_size = Some(size);
-            if cancel || create { self.new_size = None; }
-            if create { self.request(Action::New(size), ctx); }
+            if cancel || create {
+                self.new_size = None;
+            }
+            if create {
+                self.request(Action::New(size), ctx);
+            }
         }
         if self.pending.is_some() {
             let mut save = false;
@@ -230,9 +303,15 @@ impl Studio {
                     });
                 });
             });
-            if cancel { self.pending = None; }
-            if discard && let Some(action) = self.pending.take() { self.execute(action, ctx); }
-            if save { self.save_project(false, ctx); }
+            if cancel {
+                self.pending = None;
+            }
+            if discard && let Some(action) = self.pending.take() {
+                self.execute(action, ctx);
+            }
+            if save {
+                self.save_project(false, ctx);
+            }
         }
         if let Some(error) = self.error.clone() {
             let mut dismiss = false;
@@ -243,20 +322,36 @@ impl Studio {
                 ui.add_space(12.0);
                 dismiss = ui.button("Back to editing").clicked();
             });
-            if dismiss { self.error = None; }
+            if dismiss {
+                self.error = None;
+            }
         }
     }
 }
 
 fn has_extension(path: &Path, extension: &str) -> bool {
-    path.extension().and_then(|value| value.to_str()).is_some_and(|value| value.eq_ignore_ascii_case(extension))
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case(extension))
 }
 
 fn load(path: &Path, add: bool) -> Result<Loaded> {
     if has_extension(path, "vibe") {
-        ensure!(!add, "Open a project directly; adding an entire project as one layer is not supported");
-        Ok(Loaded { document: project::open(path)?, path: Some(path.to_path_buf()) })
+        ensure!(
+            !add,
+            "Open a project directly; adding an entire project as one layer is not supported"
+        );
+        Ok(Loaded {
+            document: project::open(path)?,
+            path: Some(path.to_path_buf()),
+        })
     } else {
-        Ok(Loaded { document: Document::new(image_io::open(path)?), path: None })
+        Ok(Loaded {
+            document: Document::new(image_io::open(path)?),
+            path: None,
+        })
     }
 }
+
+#[cfg(test)]
+mod tests;
