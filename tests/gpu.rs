@@ -68,3 +68,18 @@ fn failed_render_cannot_export_previous_pixels() {
     d.width = 1;
     close(&render(&mut e, &d), &[80, 90, 100, 255]);
 }
+
+#[test]
+fn tone_controls_produce_expected_pixels() {
+    let mut e = engine();
+    let mut d = Document::new(layer([255, 255, 255, 255], 1, 1));
+    d.layers[0].exposure = -1.0;
+    close(&render(&mut e, &d), &[188, 188, 188, 255]);
+    d.layers[0].contrast = 0.0;
+    close(&render(&mut e, &d), &[118, 118, 118, 255]);
+    d = Document::new(layer([255, 0, 0, 128], 1, 1));
+    d.layers[0].saturation = 0.0;
+    close(&render(&mut e, &d), &[127, 127, 127, 128]);
+    d.layers[0].reset_adjustments();
+    close(&render(&mut e, &d), &[255, 0, 0, 128]);
+}
