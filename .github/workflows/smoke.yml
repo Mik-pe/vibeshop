@@ -1,0 +1,11 @@
+name: runner-smoke
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  smoke:
+    runs-on: [self-hosted, vibeshop]
+    steps:
+      - name: hello
+        run: echo "hello from $(hostname) — runner labels work"
