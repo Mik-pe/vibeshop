@@ -28,19 +28,21 @@ jobs:
           mkdir -p "$runtime" artifacts
           chmod 700 "$runtime"
           printf 'XDG_RUNTIME_DIR=%s\n' "$runtime" >> "$GITHUB_ENV"
+          printf 'CARGO_TARGET_DIR=%s/../vibeshop-target\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           printf 'Runner: %s\nCommit: %s\n' "$RUNNER_NAME" "$GITHUB_SHA" | tee artifacts/run.txt
           git archive --format=zip --output=artifacts/source.zip HEAD
-      - name: Check runner prerequisites
+      - name: Check build prerequisites
         shell: bash
         run: |
           set -euo pipefail
-          for tool in cargo rustup pkg-config xvfb-run xdotool import convert; do
-            command -v "$tool" || { echo "Missing $tool. See docs/RUNNER.md. CI never installs system packages or uses sudo."; exit 1; }
+          for tool in cargo rustup pkg-config; do
+            command -v "$tool" || { echo "Missing $tool. See docs/RUNNER.md."; exit 1; }
           done
           rustup show
           pkg-config --exists xkbcommon wayland-client
       - name: Compile and test actual GPU pixels
+        if: ${{ !cancelled() }}
         shell: bash
         run: cargo test --locked --all-targets -- --nocapture
       - name: Lints
@@ -59,6 +61,12 @@ jobs:
         if: ${{ !cancelled() }}
         shell: bash
         run: scripts/smoke.sh
+      - name: Capture formatting diagnostics after validation
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          cargo fmt --all
+          git diff -- src tests > artifacts/formatting.patch
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
