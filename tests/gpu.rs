@@ -31,7 +31,7 @@ fn gpu_pixels_export_and_resource_reuse() {
     let mut e = engine();
     let mut d = Document::new(layer([60, 120, 210, 128], 13, 7));
     let bytes = render(&mut e, &d);
-    for p in bytes.chunks_exact(4) {
+    for p in bytes.as_chunks::<4>().0 {
         close(p, &[60, 120, 210, 128]);
     }
     assert_eq!(e.uploads, 1);
