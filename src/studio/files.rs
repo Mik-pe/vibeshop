@@ -87,6 +87,9 @@ impl Studio {
             return;
         }
         self.editor.finish_edit();
+        if ctx.input(|input| input.pointer.any_down()) {
+            self.editor.begin_edit();
+        }
         let document = self.editor.document.clone();
         let state = self.editor.state_id();
         let current_path = if save_as {
