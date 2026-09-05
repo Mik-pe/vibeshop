@@ -62,6 +62,7 @@ pub struct Engine {
     targets: Option<Targets>,
     pub uploads: u64,
     pub renders: u64,
+    render_valid: bool,
 }
 impl Engine {
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
@@ -92,9 +93,11 @@ impl Engine {
             targets: None,
             uploads: 0,
             renders: 0,
+            render_valid: false,
         }
     }
     pub fn render(&mut self, document: &Document) -> Result<bool> {
+        self.render_valid = false;
         document.validate()?;
         let limit = self.device.limits().max_texture_dimension_2d;
         ensure!(
@@ -245,12 +248,17 @@ impl Engine {
         dispatch(&mut encoder, &self.encode, &bind, t.width, t.height);
         self.queue.submit([encoder.finish()]);
         self.renders += 1;
+        self.render_valid = true;
         Ok(resized)
     }
     pub fn display_view(&self) -> Option<&wgpu::TextureView> {
         self.targets.as_ref().map(|t| &t.display.view)
     }
     pub fn readback(&self) -> Result<Readback> {
+        ensure!(
+            self.render_valid,
+            "The current image could not be rendered; refusing to export stale pixels"
+        );
         let t = self
             .targets
             .as_ref()

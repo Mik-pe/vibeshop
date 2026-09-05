@@ -56,3 +56,15 @@ fn gpu_pixels_export_and_resource_reuse() {
     d.layers.clear();
     close(&render(&mut e, &d), &[0, 0, 0, 0]);
 }
+
+#[test]
+fn failed_render_cannot_export_previous_pixels() {
+    let mut e = engine();
+    let mut d = Document::new(layer([80, 90, 100, 255], 1, 1));
+    close(&render(&mut e, &d), &[80, 90, 100, 255]);
+    d.width = 0;
+    assert!(e.render(&d).is_err());
+    assert!(e.readback().is_err());
+    d.width = 1;
+    close(&render(&mut e, &d), &[80, 90, 100, 255]);
+}

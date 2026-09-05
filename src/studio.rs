@@ -20,10 +20,11 @@ enum Tool {
 }
 enum Action {
     Open(Option<PathBuf>, bool),
+    Replace(Document),
     Exit,
 }
 enum Job {
-    Opened(Layer, bool),
+    Opened(Layer, bool, u64),
     Exported(PathBuf),
     Cancelled,
 }
@@ -34,6 +35,7 @@ pub struct Studio {
     render_state: eframe::egui_wgpu::RenderState,
     texture: Option<egui::TextureId>,
     rendered_revision: u64,
+    render_valid: bool,
     tool: Tool,
     zoom: f32,
     pan: Vec2,
@@ -61,6 +63,7 @@ impl Studio {
             render_state: state,
             texture: None,
             rendered_revision: 0,
+            render_valid: false,
             tool: Tool::Hand,
             zoom: 1.0,
             pan: Vec2::ZERO,
@@ -74,10 +77,11 @@ impl Studio {
             adapter: format!("{} · {:?}", adapter.name, adapter.backend),
         })
     }
-    fn render(&mut self) {
+    fn render(&mut self) -> bool {
         if self.rendered_revision == self.editor.revision {
-            return;
+            return self.render_valid;
         }
+        self.render_valid = false;
         match self.gpu.render(&self.editor.document) {
             Ok(resized) => {
                 if let Some(view) = self.gpu.display_view() {
@@ -98,16 +102,23 @@ impl Studio {
                         }
                         _ => {}
                     }
+                    self.render_valid = true;
                 }
-                self.rendered_revision = self.editor.revision;
             }
             Err(error) => {
                 self.error = Some(format!("{error:#}"));
-                self.rendered_revision = self.editor.revision;
+                if let Some(id) = self.texture.take() {
+                    self.render_state.renderer.write().free_texture(&id);
+                }
             }
         }
+        self.rendered_revision = self.editor.revision;
+        self.render_valid
     }
     fn request(&mut self, action: Action, ctx: &egui::Context) {
+        if self.pending.is_some() || self.error.is_some() {
+            return;
+        }
         if self.job.is_some() {
             self.status = "Finish the current file operation first".into();
             return;
@@ -124,7 +135,13 @@ impl Studio {
                 self.allow_close = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
+            Action::Replace(document) => {
+                self.editor.replace(document);
+                self.fit = true;
+                self.status = "Image opened locally · source pixels are preserved".into();
+            }
             Action::Open(path, add) => {
+                let revision = self.editor.revision;
                 let (tx, rx) = mpsc::sync_channel(1);
                 self.job = Some(rx);
                 self.status = "Opening image…".into();
@@ -140,7 +157,7 @@ impl Studio {
                             .map(|f| f.path().to_path_buf())
                         });
                         match path {
-                            Some(path) => Ok(Job::Opened(image_io::open(&path)?, add)),
+                            Some(path) => Ok(Job::Opened(image_io::open(&path)?, add, revision)),
                             None => Ok(Job::Cancelled),
                         }
                     })();
@@ -154,7 +171,9 @@ impl Studio {
         if self.job.is_some() {
             return;
         }
-        self.render();
+        if !self.render() {
+            return;
+        }
         let snapshot = match self.gpu.readback() {
             Ok(s) => s,
             Err(e) => {
@@ -176,7 +195,7 @@ impl Studio {
                 ) else {
                     return Ok(Job::Cancelled);
                 };
-                let path = file.path().with_extension("png");
+                let path = png_destination(file.path())?;
                 let (w, h) = (snapshot.width, snapshot.height);
                 let pixels = snapshot.finish()?;
                 image_io::save_png(&path, w, h, &pixels)?;
@@ -196,7 +215,7 @@ impl Studio {
         };
         self.job = None;
         match result {
-            Ok(Job::Opened(layer, add)) => {
+            Ok(Job::Opened(layer, add, revision)) => {
                 let limit = self.gpu.device.limits().max_texture_dimension_2d;
                 if layer.source.width > limit || layer.source.height > limit {
                     self.error = Some(format!("Image exceeds this GPU's {limit}px texture limit"));
@@ -208,8 +227,17 @@ impl Studio {
                         return;
                     }
                 } else {
-                    self.editor.replace(Document::new(layer));
-                    self.fit = true;
+                    match self
+                        .editor
+                        .replace_if_revision(Document::new(layer), revision)
+                    {
+                        Ok(()) => self.fit = true,
+                        Err(document) => {
+                            self.pending = Some(Action::Replace(document));
+                            self.status = "Your work changed while opening the image · choose whether to replace it".into();
+                            return;
+                        }
+                    }
                 }
                 self.status = "Image opened locally · source pixels are preserved".into();
             }
@@ -470,32 +498,31 @@ impl Studio {
                     self.pan += response.drag_delta();
                     self.fit = false;
                 }
-                if response.drag_started() && !panning {
-                    if let (Some(pointer), Some(layer)) = (
+                if response.drag_started()
+                    && !panning
+                    && let (Some(pointer), Some(layer)) = (
                         ctx.input(|i| i.pointer.press_origin()),
                         self.editor.document.layers.get(self.editor.selected),
-                    ) {
-                        self.move_start = Some((pointer, layer.offset));
-                        self.editor.begin_edit();
-                    }
+                    )
+                {
+                    self.move_start = Some((pointer, layer.offset));
+                    self.editor.begin_edit();
                 }
-                if response.dragged() && !panning {
-                    if let (Some((start, offset)), Some(pointer)) =
+                if response.dragged()
+                    && !panning
+                    && let (Some((start, offset)), Some(pointer)) =
                         (self.move_start, response.interact_pointer_pos())
+                {
+                    let delta = (pointer - start) * pixels_per_point / self.zoom;
+                    let next = [
+                        (offset[0] + delta.x.round() as i32).clamp(-8192, 8192),
+                        (offset[1] + delta.y.round() as i32).clamp(-8192, 8192),
+                    ];
+                    if let Some(layer) = self.editor.document.layers.get_mut(self.editor.selected)
+                        && layer.offset != next
                     {
-                        let delta = (pointer - start) * pixels_per_point / self.zoom;
-                        let next = [
-                            (offset[0] + delta.x.round() as i32).clamp(-8192, 8192),
-                            (offset[1] + delta.y.round() as i32).clamp(-8192, 8192),
-                        ];
-                        if let Some(layer) =
-                            self.editor.document.layers.get_mut(self.editor.selected)
-                        {
-                            if layer.offset != next {
-                                layer.offset = next;
-                                self.editor.changed();
-                            }
-                        }
+                        layer.offset = next;
+                        self.editor.changed();
                     }
                 }
                 if response.drag_stopped() {
@@ -549,7 +576,7 @@ impl Studio {
                 painter.rect_stroke(
                     image,
                     0.0,
-                    Stroke::new(1.0, Color32::from_gray(76)),
+                    Stroke::new(1.0_f32, Color32::from_gray(76)),
                     egui::StrokeKind::Outside,
                 );
                 painter.text(
@@ -572,32 +599,32 @@ impl Studio {
         if self.pending.is_some() {
             let mut proceed = false;
             let mut cancel = false;
-            egui::Window::new("Keep your work").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+            egui::Modal::new(egui::Id::new("unsaved-work")).show(ctx, |ui| {
                 ui.set_max_width(390.0);
-                ui.label("Your editable layers exist only in memory. Export a PNG before discarding them. Export is a flattened image, not an editable project."); ui.add_space(14.0);
-                ui.horizontal(|ui| { cancel = ui.button("Keep editing").clicked(); proceed = ui.button("Discard layers and continue").clicked(); });
+                ui.heading("Keep your work");
+                ui.label("Your editable layers exist only in memory. Export a PNG before discarding them. Export is a flattened image, not an editable project.");
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    cancel = ui.button("Keep editing").clicked();
+                    proceed = ui.button("Discard layers and continue").clicked();
+                });
             });
             if cancel {
                 self.pending = None;
             }
-            if proceed {
-                if let Some(action) = self.pending.take() {
-                    self.execute(action, ctx);
-                }
+            if proceed && let Some(action) = self.pending.take() {
+                self.execute(action, ctx);
             }
         }
         if let Some(error) = self.error.clone() {
             let mut dismiss = false;
-            egui::Window::new("Could not complete that")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-                .show(ctx, |ui| {
-                    ui.set_max_width(450.0);
-                    ui.label(error);
-                    ui.add_space(12.0);
-                    dismiss = ui.button("Back to editing").clicked();
-                });
+            egui::Modal::new(egui::Id::new("operation-error")).show(ctx, |ui| {
+                ui.set_max_width(450.0);
+                ui.heading("Could not complete that");
+                ui.label(error);
+                ui.add_space(12.0);
+                dismiss = ui.button("Back to editing").clicked();
+            });
             if dismiss {
                 self.error = None;
             }
@@ -639,6 +666,15 @@ impl eframe::App for Studio {
         self.dialogs(ctx);
     }
 }
+fn png_destination(path: &std::path::Path) -> Result<PathBuf> {
+    anyhow::ensure!(
+        path.extension()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s.eq_ignore_ascii_case("png")),
+        "Choose a filename ending in .png. The export path will not be silently changed."
+    );
+    Ok(path.to_path_buf())
+}
 fn zoom_pan(pan: Vec2, anchor: Vec2, ratio: f32) -> Vec2 {
     anchor - (anchor - pan) * ratio
 }
@@ -663,11 +699,11 @@ fn theme(ctx: &egui::Context) {
     visuals.window_fill = PANEL;
     visuals.override_text_color = Some(Color32::from_rgb(234, 235, 237));
     visuals.selection.bg_fill = Color32::from_rgb(74, 90, 50);
-    visuals.selection.stroke = Stroke::new(1.0, ACCENT);
+    visuals.selection.stroke = Stroke::new(1.0_f32, ACCENT);
     visuals.widgets.inactive.bg_fill = Color32::from_rgb(41, 44, 50);
     visuals.widgets.hovered.bg_fill = Color32::from_rgb(59, 65, 59);
     visuals.widgets.active.bg_fill = Color32::from_rgb(71, 83, 54);
-    visuals.widgets.active.fg_stroke = Stroke::new(1.5, ACCENT);
+    visuals.widgets.active.fg_stroke = Stroke::new(1.5_f32, ACCENT);
     ctx.set_visuals(visuals);
     ctx.style_mut(|style| {
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
@@ -679,6 +715,13 @@ fn theme(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn export_keeps_the_exact_confirmed_path() {
+        let path = std::path::Path::new("Original.PNG");
+        assert_eq!(png_destination(path).unwrap(), path);
+        assert!(png_destination(std::path::Path::new("Original.jpg")).is_err());
+        assert!(png_destination(std::path::Path::new("Original")).is_err());
+    }
     #[test]
     fn cursor_anchored_zoom_preserves_image_coordinate() {
         let pan = egui::vec2(21.0, -17.0);

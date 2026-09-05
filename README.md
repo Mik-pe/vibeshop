@@ -13,7 +13,7 @@ cargo run --locked --release
 On Ubuntu/Debian, install the native build/runtime dependencies first:
 
 ```sh
-sudo apt-get install build-essential pkg-config libxkbcommon-dev libwayland-dev libvulkan1 mesa-vulkan-drivers
+sudo apt-get install build-essential pkg-config libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev libvulkan1 mesa-vulkan-drivers
 ```
 
 A working Vulkan, Metal, or DirectX 12 adapter is required. Linux file dialogs use your desktop's XDG portal. The native application starts with an original generated dune study; no sample download, account, API key, or network service is required.

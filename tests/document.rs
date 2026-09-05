@@ -84,3 +84,23 @@ fn png_roundtrip_and_failed_export_preserves_destination() {
     assert!(vibeshop::image_io::save_png(&path, 2, 1, &[0]).is_err());
     assert_eq!(std::fs::read(path).unwrap(), before);
 }
+
+#[test]
+fn a_late_open_cannot_discard_newer_edits() {
+    let mut e = editor();
+    let requested_revision = e.revision;
+    let incoming = Document::new(Layer::new(
+        "incoming",
+        Source::new(1, 1, vec![1, 2, 3, 255]).unwrap(),
+    ));
+    e.edit(|d, _| d.layers[0].exposure = 1.0);
+    let pending = e
+        .replace_if_revision(incoming, requested_revision)
+        .unwrap_err();
+    assert_eq!(e.document.layers[0].name, "test");
+    assert_eq!(e.document.layers[0].exposure, 1.0);
+    assert!(e.can_undo());
+    e.replace_if_revision(pending, e.revision).unwrap();
+    assert_eq!(e.document.layers[0].name, "incoming");
+    assert!(!e.can_undo());
+}

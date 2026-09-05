@@ -12,7 +12,7 @@ pub const MAX_LAYERS: usize = 16;
 const MAX_HISTORY: usize = 32;
 static NEXT_IMAGE: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Source {
     pub id: u64,
     pub width: u32,
@@ -188,18 +188,20 @@ impl Editor {
         self.dirty = true;
     }
     pub fn finish_edit(&mut self) {
-        if let Some(before) = self.gesture.take() {
-            if before != self.document {
-                self.undo.push(before);
-                self.redo.clear();
-                while self.undo.len() > MAX_HISTORY
-                    || (source_bytes(std::iter::once(&self.document).chain(self.undo.iter()))
-                        > MAX_SOURCE_BYTES
-                        && !self.undo.is_empty())
-                {
-                    self.undo.remove(0);
-                }
-            }
+        let Some(before) = self.gesture.take() else {
+            return;
+        };
+        if before == self.document {
+            return;
+        }
+        self.undo.push(before);
+        self.redo.clear();
+        while self.undo.len() > MAX_HISTORY
+            || (source_bytes(std::iter::once(&self.document).chain(self.undo.iter()))
+                > MAX_SOURCE_BYTES
+                && !self.undo.is_empty())
+        {
+            self.undo.remove(0);
         }
     }
     pub fn edit(&mut self, f: impl FnOnce(&mut Document, &mut usize)) {
@@ -243,6 +245,17 @@ impl Editor {
             *selected = next.layers.len() - 1;
             *doc = next;
         });
+        Ok(())
+    }
+    pub fn replace_if_revision(
+        &mut self,
+        document: Document,
+        expected: u64,
+    ) -> std::result::Result<(), Document> {
+        if self.revision != expected {
+            return Err(document);
+        }
+        self.replace(document);
         Ok(())
     }
     pub fn replace(&mut self, document: Document) {
