@@ -118,7 +118,11 @@ impl Document {
     }
     pub fn blank(width: u32, height: u32) -> Result<Self> {
         validate_size(width, height)?;
-        Ok(Self { width, height, layers: Vec::new() })
+        Ok(Self {
+            width,
+            height,
+            layers: Vec::new(),
+        })
     }
     pub fn validate(&self) -> Result<()> {
         validate_size(self.width, self.height)?;
@@ -226,7 +230,10 @@ impl Editor {
         self.undo.push(before);
         self.redo.clear();
         while self.undo.len() > MAX_HISTORY
-            || (source_bytes(std::iter::once(&self.document).chain(self.undo.iter().map(|s| &s.document))) > MAX_SOURCE_BYTES && !self.undo.is_empty())
+            || (source_bytes(
+                std::iter::once(&self.document).chain(self.undo.iter().map(|s| &s.document)),
+            ) > MAX_SOURCE_BYTES
+                && !self.undo.is_empty())
         {
             self.undo.remove(0);
         }
@@ -235,14 +242,22 @@ impl Editor {
         self.finish_edit();
         self.begin_edit();
         f(&mut self.document, &mut self.selected);
-        if self.gesture.as_ref().is_some_and(|s| s.document != self.document) {
+        if self
+            .gesture
+            .as_ref()
+            .is_some_and(|s| s.document != self.document)
+        {
             self.changed();
         }
         self.finish_edit();
         self.clamp_selection();
     }
     pub fn can_undo(&self) -> bool {
-        !self.undo.is_empty() || self.gesture.as_ref().is_some_and(|s| s.document != self.document)
+        !self.undo.is_empty()
+            || self
+                .gesture
+                .as_ref()
+                .is_some_and(|s| s.document != self.document)
     }
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
@@ -292,7 +307,10 @@ impl Editor {
         self.saved_state = Some(state);
     }
     fn snapshot(&self) -> Snapshot {
-        Snapshot { document: self.document.clone(), state: self.state }
+        Snapshot {
+            document: self.document.clone(),
+            state: self.state,
+        }
     }
     fn restore(&mut self, snapshot: Snapshot) {
         self.document = snapshot.document;
@@ -305,7 +323,9 @@ impl Editor {
         self.dirty = self.saved_state != Some(self.state);
     }
     fn clamp_selection(&mut self) {
-        self.selected = self.selected.min(self.document.layers.len().saturating_sub(1));
+        self.selected = self
+            .selected
+            .min(self.document.layers.len().saturating_sub(1));
     }
 }
 

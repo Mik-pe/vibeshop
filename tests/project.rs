@@ -14,7 +14,11 @@ fn fixture() -> Document {
     top.saturation = 1.2;
     top.offset = [-3, 7];
     top.blend = Blend::Screen;
-    Document { width: 7, height: 3, layers: vec![bottom, top] }
+    Document {
+        width: 7,
+        height: 3,
+        layers: vec![bottom, top],
+    }
 }
 
 fn encoded(document: &Document) -> Vec<u8> {
@@ -30,7 +34,10 @@ fn all_layer_settings_and_shared_originals_round_trip() {
     let loaded = project::read_from(&mut Cursor::new(&bytes)).unwrap();
     assert_eq!((loaded.width, loaded.height), (7, 3));
     assert_eq!(loaded.layers.len(), original.layers.len());
-    assert!(Arc::ptr_eq(&loaded.layers[0].source, &loaded.layers[1].source));
+    assert!(Arc::ptr_eq(
+        &loaded.layers[0].source,
+        &loaded.layers[1].source
+    ));
     assert_ne!(loaded.layers[0].source.id, original.layers[0].source.id);
     for (actual, expected) in loaded.layers.iter().zip(&original.layers) {
         assert_eq!(actual.source.rgba, expected.source.rgba);
@@ -54,7 +61,10 @@ fn an_empty_canvas_is_a_valid_editable_project() {
 fn every_truncated_prefix_is_rejected() {
     let bytes = encoded(&fixture());
     for length in 0..bytes.len() {
-        assert!(project::read_from(&mut Cursor::new(&bytes[..length])).is_err(), "Accepted prefix {length}");
+        assert!(
+            project::read_from(&mut Cursor::new(&bytes[..length])).is_err(),
+            "Accepted prefix {length}"
+        );
     }
 }
 
@@ -86,7 +96,10 @@ fn malformed_headers_assets_and_layers_are_rejected() {
     for (offset, replacement) in cases {
         let mut bad = bytes.clone();
         bad[offset..offset + replacement.len()].copy_from_slice(&replacement);
-        assert!(project::read_from(&mut Cursor::new(bad)).is_err(), "Accepted invalid field at {offset}");
+        assert!(
+            project::read_from(&mut Cursor::new(bad)).is_err(),
+            "Accepted invalid field at {offset}"
+        );
     }
     let mut trailing = bytes;
     trailing.push(0);
@@ -110,7 +123,10 @@ fn duplicate_and_unreferenced_assets_are_rejected() {
 fn oversized_files_are_rejected_before_reading_assets() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("oversized.vibe");
-    std::fs::File::create(&path).unwrap().set_len(project::MAX_FILE_BYTES + 1).unwrap();
+    std::fs::File::create(&path)
+        .unwrap()
+        .set_len(project::MAX_FILE_BYTES + 1)
+        .unwrap();
     assert!(project::open(&path).is_err());
 }
 

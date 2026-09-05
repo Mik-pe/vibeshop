@@ -5,7 +5,9 @@ use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::document::{Blend, Document, Layer, MAX_LAYERS, MAX_SOURCE_BYTES, Source, validate_size};
+use crate::document::{
+    Blend, Document, Layer, MAX_LAYERS, MAX_SOURCE_BYTES, Source, validate_size,
+};
 
 const MAGIC: &[u8; 8] = b"VIBESHOP";
 const VERSION: u32 = 1;
@@ -26,16 +28,28 @@ pub fn write_to(writer: &mut impl Write, document: &Document) -> Result<()> {
     let mut indices = HashMap::new();
     let mut sources: Vec<&Arc<Source>> = Vec::new();
     for layer in &document.layers {
-        ensure!(layer.name.len() <= MAX_NAME, "Layer name exceeds 4096 bytes");
+        ensure!(
+            layer.name.len() <= MAX_NAME,
+            "Layer name exceeds 4096 bytes"
+        );
         if let Some(&index) = indices.get(&layer.source.id) {
-            ensure!(Arc::ptr_eq(sources[index], &layer.source), "Conflicting source identities");
+            ensure!(
+                Arc::ptr_eq(sources[index], &layer.source),
+                "Conflicting source identities"
+            );
         } else {
             indices.insert(layer.source.id, sources.len());
             sources.push(&layer.source);
         }
     }
     writer.write_all(MAGIC)?;
-    for number in [VERSION, document.width, document.height, sources.len() as u32, document.layers.len() as u32] {
+    for number in [
+        VERSION,
+        document.width,
+        document.height,
+        sources.len() as u32,
+        document.layers.len() as u32,
+    ] {
         writer.write_all(&number.to_le_bytes())?;
     }
     for (index, source) in sources.iter().enumerate() {
@@ -50,7 +64,12 @@ pub fn write_to(writer: &mut impl Write, document: &Document) -> Result<()> {
         writer.write_all(layer.name.as_bytes())?;
         writer.write_all(&(indices[&layer.source.id] as u32).to_le_bytes())?;
         writer.write_all(&[u8::from(layer.visible), layer.blend as u8])?;
-        for value in [layer.opacity, layer.exposure, layer.contrast, layer.saturation] {
+        for value in [
+            layer.opacity,
+            layer.exposure,
+            layer.contrast,
+            layer.saturation,
+        ] {
             writer.write_all(&value.to_le_bytes())?;
         }
         for offset in layer.offset {
@@ -62,7 +81,10 @@ pub fn write_to(writer: &mut impl Write, document: &Document) -> Result<()> {
 
 pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Document> {
     let length = reader.seek(SeekFrom::End(0))?;
-    ensure!((28..=MAX_FILE_BYTES).contains(&length), "Project file exceeds limits or is truncated");
+    ensure!(
+        (28..=MAX_FILE_BYTES).contains(&length),
+        "Project file exceeds limits or is truncated"
+    );
     reader.rewind()?;
     ensure!(&read_array::<8>(reader)? == MAGIC, "Not a Vibeshop project");
     ensure!(read_u32(reader)? == VERSION, "Unsupported project version");
@@ -71,22 +93,38 @@ pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Document> {
     validate_size(width, height)?;
     let source_count = read_u32(reader)? as usize;
     let layer_count = read_u32(reader)? as usize;
-    ensure!(source_count <= layer_count && layer_count <= MAX_LAYERS, "Invalid source or layer count");
+    ensure!(
+        source_count <= layer_count && layer_count <= MAX_LAYERS,
+        "Invalid source or layer count"
+    );
     let mut sources = vec![None; source_count];
     let mut retained_bytes = 0_u64;
     for _ in 0..source_count {
         let index = read_u32(reader)? as usize;
-        ensure!(index < source_count && sources[index].is_none(), "Duplicate or invalid asset index");
+        ensure!(
+            index < source_count && sources[index].is_none(),
+            "Duplicate or invalid asset index"
+        );
         let w = read_u32(reader)?;
         let h = read_u32(reader)?;
         validate_size(w, h)?;
         let bytes = u64::from_le_bytes(read_array(reader)?);
-        ensure!(bytes == u64::from(w) * u64::from(h) * 4, "Invalid asset byte count");
+        ensure!(
+            bytes == u64::from(w) * u64::from(h) * 4,
+            "Invalid asset byte count"
+        );
         retained_bytes += bytes;
-        ensure!(retained_bytes <= MAX_SOURCE_BYTES as u64, "Project source budget exceeded");
-        ensure!(bytes <= length.saturating_sub(reader.stream_position()?), "Truncated asset");
+        ensure!(
+            retained_bytes <= MAX_SOURCE_BYTES as u64,
+            "Project source budget exceeded"
+        );
+        ensure!(
+            bytes <= length.saturating_sub(reader.stream_position()?),
+            "Truncated asset"
+        );
         let mut rgba = Vec::new();
-        rgba.try_reserve_exact(bytes as usize).context("Not enough memory for project asset")?;
+        rgba.try_reserve_exact(bytes as usize)
+            .context("Not enough memory for project asset")?;
         rgba.resize(bytes as usize, 0);
         reader.read_exact(&mut rgba)?;
         sources[index] = Some(Source::new(w, h, rgba)?);
@@ -100,7 +138,10 @@ pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Document> {
         reader.read_exact(&mut name)?;
         let name = String::from_utf8(name).context("Layer name is not UTF-8")?;
         let index = read_u32(reader)? as usize;
-        let source = sources.get(index).and_then(Option::as_ref).context("Missing layer asset")?;
+        let source = sources
+            .get(index)
+            .and_then(Option::as_ref)
+            .context("Missing layer asset")?;
         used[index] = true;
         let [visible, blend] = read_array(reader)?;
         ensure!(visible <= 1, "Invalid visibility value");
@@ -119,12 +160,22 @@ pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Document> {
             exposure: f32::from_le_bytes(read_array(reader)?),
             contrast: f32::from_le_bytes(read_array(reader)?),
             saturation: f32::from_le_bytes(read_array(reader)?),
-            offset: [i32::from_le_bytes(read_array(reader)?), i32::from_le_bytes(read_array(reader)?)],
+            offset: [
+                i32::from_le_bytes(read_array(reader)?),
+                i32::from_le_bytes(read_array(reader)?),
+            ],
         });
     }
     ensure!(used.iter().all(|used| *used), "Unused project asset");
-    ensure!(reader.stream_position()? == length, "Unexpected trailing project data");
-    let document = Document { width, height, layers };
+    ensure!(
+        reader.stream_position()? == length,
+        "Unexpected trailing project data"
+    );
+    let document = Document {
+        width,
+        height,
+        layers,
+    };
     document.validate()?;
     Ok(document)
 }

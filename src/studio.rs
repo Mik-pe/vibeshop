@@ -111,7 +111,11 @@ impl Studio {
         self.render_valid
     }
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if text_editor_has_focus(ctx) || self.pending.is_some() || self.error.is_some() || self.new_size.is_some() {
+        if text_editor_has_focus(ctx)
+            || self.pending.is_some()
+            || self.error.is_some()
+            || self.new_size.is_some()
+        {
             return;
         }
         let command = egui::Modifiers::COMMAND;
@@ -164,11 +168,17 @@ impl Studio {
                     ui.label(RichText::new("shop").size(25.0).strong());
                     ui.add_space(16.0);
                     ui.menu_button("File", |ui| {
-                        if ui.add_enabled(self.job.is_none(), egui::Button::new("New canvas…")).clicked() {
+                        if ui
+                            .add_enabled(self.job.is_none(), egui::Button::new("New canvas…"))
+                            .clicked()
+                        {
                             self.new_size = Some([1920, 1080]);
                             ui.close();
                         }
-                        if ui.add_enabled(self.job.is_none(), egui::Button::new("Save project as…")).clicked() {
+                        if ui
+                            .add_enabled(self.job.is_none(), egui::Button::new("Save project as…"))
+                            .clicked()
+                        {
                             self.save_project(true, ctx);
                             ui.close();
                         }
@@ -187,7 +197,11 @@ impl Studio {
                     {
                         self.request(Action::Open(None, true), ctx);
                     }
-                    if ui.add_enabled(self.job.is_none(), egui::Button::new("Save project")).on_hover_text("Ctrl/Cmd+S · saves editable layers").clicked() {
+                    if ui
+                        .add_enabled(self.job.is_none(), egui::Button::new("Save project"))
+                        .on_hover_text("Ctrl/Cmd+S · saves editable layers")
+                        .clicked()
+                    {
                         self.save_project(false, ctx);
                     }
                     ui.separator();

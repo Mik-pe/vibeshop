@@ -6,10 +6,17 @@ use vibeshop::gpu::Engine;
 
 fn studio() -> (Studio, egui::Context) {
     let instance = wgpu::Instance::default();
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).expect("File-controller tests require an actual GPU adapter");
+    let adapter =
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+            .expect("File-controller tests require an actual GPU adapter");
     eprintln!("File-controller GPU: {:?}", adapter.get_info());
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
-    let renderer = eframe::egui_wgpu::Renderer::new(&device, wgpu::TextureFormat::Rgba8Unorm, Default::default());
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let renderer = eframe::egui_wgpu::Renderer::new(
+        &device,
+        wgpu::TextureFormat::Rgba8Unorm,
+        Default::default(),
+    );
     let render_state = eframe::egui_wgpu::RenderState {
         adapter,
         available_adapters: Vec::new(),
@@ -20,28 +27,31 @@ fn studio() -> (Studio, egui::Context) {
     };
     let ctx = egui::Context::default();
     super::super::theme(&ctx);
-    (Studio {
-        editor: Editor::new(Document::blank(13, 7).unwrap()),
-        gpu: Engine::new(device, queue),
-        render_state,
-        texture: None,
-        rendered_revision: 0,
-        render_valid: false,
-        tool: super::super::Tool::Hand,
-        zoom: 1.0,
-        pan: egui::Vec2::ZERO,
-        fit: true,
-        move_start: None,
-        job: None,
-        pending: None,
-        allow_close: false,
-        status: String::new(),
-        error: None,
-        adapter: String::new(),
-        project_path: None,
-        new_size: None,
-        startup: None,
-    }, ctx)
+    (
+        Studio {
+            editor: Editor::new(Document::blank(13, 7).unwrap()),
+            gpu: Engine::new(device, queue),
+            render_state,
+            texture: None,
+            rendered_revision: 0,
+            render_valid: false,
+            tool: super::super::Tool::Hand,
+            zoom: 1.0,
+            pan: egui::Vec2::ZERO,
+            fit: true,
+            move_start: None,
+            job: None,
+            pending: None,
+            allow_close: false,
+            status: String::new(),
+            error: None,
+            adapter: String::new(),
+            project_path: None,
+            new_size: None,
+            startup: None,
+        },
+        ctx,
+    )
 }
 
 fn drain(app: &mut Studio, ctx: &egui::Context) {
@@ -78,7 +88,8 @@ fn project_open_keyboard_save_reopen_and_export_keep_the_same_pixels() {
     app.request(Action::Open(Some(path.clone()), false), &ctx);
     drain(&mut app, &ctx);
     assert!(app.error.is_none(), "{:?}", app.error);
-    app.editor.edit(|document, _| document.layers[0].exposure = 0.5);
+    app.editor
+        .edit(|document, _| document.layers[0].exposure = 0.5);
     let mut top = app.editor.document.layers[0].clone();
     top.blend = Blend::Multiply;
     top.opacity = 0.4;
@@ -141,12 +152,32 @@ fn late_open_and_save_results_do_not_discard_newer_edits() {
     let (mut app, ctx) = studio();
     let revision = app.editor.revision;
     let saved_state = app.editor.state_id();
-    app.editor.add_layer(Layer::new("New work", Source::new(1, 1, vec![1, 2, 3, 255]).unwrap())).unwrap();
+    app.editor
+        .add_layer(Layer::new(
+            "New work",
+            Source::new(1, 1, vec![1, 2, 3, 255]).unwrap(),
+        ))
+        .unwrap();
     let before = app.editor.document.clone();
-    complete(&mut app, &ctx, Ok(Job::Opened(Loaded { document: Document::blank(50, 50).unwrap(), path: None }, false, revision)));
+    complete(
+        &mut app,
+        &ctx,
+        Ok(Job::Opened(
+            Loaded {
+                document: Document::blank(50, 50).unwrap(),
+                path: None,
+            },
+            false,
+            revision,
+        )),
+    );
     assert!(matches!(app.pending, Some(Action::Replace(_))));
     assert_eq!(app.editor.document, before);
-    complete(&mut app, &ctx, Ok(Job::Saved(PathBuf::from("work.vibe"), saved_state)));
+    complete(
+        &mut app,
+        &ctx,
+        Ok(Job::Saved(PathBuf::from("work.vibe"), saved_state)),
+    );
     assert!(app.editor.dirty);
     assert!(matches!(app.pending, Some(Action::Replace(_))));
     assert_eq!(app.editor.document, before);
