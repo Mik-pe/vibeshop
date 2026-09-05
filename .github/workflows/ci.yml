@@ -1,0 +1,49 @@
+name: CI
+on:
+  push:
+    branches: [main, 'agent/**']
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+      WGPU_BACKEND: vulkan
+      XDG_RUNTIME_DIR: /tmp/vibeshop-runtime
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libvulkan1 mesa-vulkan-drivers xvfb
+          mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+      - name: Toolchain
+        run: rustup show
+      - name: Resolve initial lockfile
+        run: cargo generate-lockfile
+      - name: Compile and test real GPU pixels
+        run: cargo test --locked --all-targets -- --nocapture
+      - name: Lints
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Bootstrap diagnostics
+        if: always()
+        run: |
+          cargo fmt --all
+          mkdir -p artifacts
+          git diff > artifacts/formatting.patch
+          cp Cargo.lock artifacts/Cargo.lock
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: bootstrap-diagnostics
+          path: artifacts/
