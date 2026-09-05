@@ -1,4 +1,4 @@
-name: Bootstrap lockfile and formatting
+name: Finish bootstrap safety fixes
 on:
   push:
     branches: [agent/bootstrap-editor]
@@ -15,11 +15,10 @@ jobs:
         with:
           ref: agent/bootstrap-editor
       - run: |
-          rustup show
-          cargo generate-lockfile
+          node scripts/bootstrap-edit.mjs
+          node scripts/bootstrap-lints.mjs
           cargo fmt --all
-          git add Cargo.lock src tests
-          if ! git diff --cached --quiet; then
-            git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Lock dependencies and format the initial Rust implementation'
-            git push origin HEAD:agent/bootstrap-editor
-          fi
+          git add src tests README.md
+          git rm scripts/bootstrap-edit.mjs scripts/bootstrap-lints.mjs .github/workflows/bootstrap.yml
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Guard stale exports and late image loads; fix diagnostics; remove bootstrap workflow'
+          git push origin HEAD:agent/bootstrap-editor
