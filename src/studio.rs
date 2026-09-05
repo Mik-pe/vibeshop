@@ -1,13 +1,12 @@
 use anyhow::{Context, Result};
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
-use std::{
-    path::PathBuf,
-    sync::mpsc::{self, Receiver, TryRecvError},
-};
+use std::{path::PathBuf, sync::mpsc::Receiver};
+
+mod files;
+use files::{Action, Job};
 use vibeshop::{
-    document::{self, Blend, Document, Editor, Layer},
+    document::{self, Blend, Editor},
     gpu::Engine,
-    image_io,
 };
 
 const ACCENT: Color32 = Color32::from_rgb(216, 247, 153);
@@ -17,16 +16,6 @@ const MUTED: Color32 = Color32::from_rgb(150, 155, 165);
 enum Tool {
     Hand,
     Move,
-}
-enum Action {
-    Open(Option<PathBuf>, bool),
-    Replace(Document),
-    Exit,
-}
-enum Job {
-    Opened(Layer, bool, u64),
-    Exported(PathBuf),
-    Cancelled,
 }
 
 pub struct Studio {
@@ -47,6 +36,9 @@ pub struct Studio {
     status: String,
     error: Option<String>,
     adapter: String,
+    project_path: Option<PathBuf>,
+    new_size: Option<[u32; 2]>,
+    startup: Option<PathBuf>,
 }
 impl Studio {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Result<Self> {
@@ -75,6 +67,9 @@ impl Studio {
             status: "Generated demo · open a photo to make it yours".into(),
             error: None,
             adapter: format!("{} · {:?}", adapter.name, adapter.backend),
+            project_path: None,
+            new_size: None,
+            startup: std::env::args_os().nth(1).map(PathBuf::from),
         })
     }
     fn render(&mut self) -> bool {
@@ -115,147 +110,12 @@ impl Studio {
         self.rendered_revision = self.editor.revision;
         self.render_valid
     }
-    fn request(&mut self, action: Action, ctx: &egui::Context) {
-        if self.pending.is_some() || self.error.is_some() {
-            return;
-        }
-        if self.job.is_some() {
-            self.status = "Finish the current file operation first".into();
-            return;
-        }
-        if self.editor.dirty && !matches!(action, Action::Open(_, true)) {
-            self.pending = Some(action);
-        } else {
-            self.execute(action, ctx);
-        }
-    }
-    fn execute(&mut self, action: Action, ctx: &egui::Context) {
-        match action {
-            Action::Exit => {
-                self.allow_close = true;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
-            Action::Replace(document) => {
-                self.editor.replace(document);
-                self.fit = true;
-                self.status = "Image opened locally · source pixels are preserved".into();
-            }
-            Action::Open(path, add) => {
-                let revision = self.editor.revision;
-                let (tx, rx) = mpsc::sync_channel(1);
-                self.job = Some(rx);
-                self.status = "Opening image…".into();
-                let ctx = ctx.clone();
-                std::thread::spawn(move || {
-                    let result = (|| {
-                        let path = path.or_else(|| {
-                            pollster::block_on(
-                                rfd::AsyncFileDialog::new()
-                                    .add_filter("Images", &["png", "jpg", "jpeg"])
-                                    .pick_file(),
-                            )
-                            .map(|f| f.path().to_path_buf())
-                        });
-                        match path {
-                            Some(path) => Ok(Job::Opened(image_io::open(&path)?, add, revision)),
-                            None => Ok(Job::Cancelled),
-                        }
-                    })();
-                    let _ = tx.send(result);
-                    ctx.request_repaint();
-                });
-            }
-        }
-    }
-    fn export(&mut self, ctx: &egui::Context) {
-        if self.job.is_some() {
-            return;
-        }
-        if !self.render() {
-            return;
-        }
-        let snapshot = match self.gpu.readback() {
-            Ok(s) => s,
-            Err(e) => {
-                self.error = Some(e.to_string());
-                return;
-            }
-        };
-        let (tx, rx) = mpsc::sync_channel(1);
-        self.job = Some(rx);
-        self.status = "Exporting PNG…".into();
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let result = (|| {
-                let Some(file) = pollster::block_on(
-                    rfd::AsyncFileDialog::new()
-                        .add_filter("PNG", &["png"])
-                        .set_file_name("vibeshop.png")
-                        .save_file(),
-                ) else {
-                    return Ok(Job::Cancelled);
-                };
-                let path = png_destination(file.path())?;
-                let (w, h) = (snapshot.width, snapshot.height);
-                let pixels = snapshot.finish()?;
-                image_io::save_png(&path, w, h, &pixels)?;
-                Ok(Job::Exported(path))
-            })();
-            let _ = tx.send(result);
-            ctx.request_repaint();
-        });
-    }
-    fn poll_job(&mut self) {
-        let result = match self.job.as_ref().map(|r| r.try_recv()) {
-            Some(Ok(result)) => result,
-            Some(Err(TryRecvError::Disconnected)) => {
-                Err(anyhow::anyhow!("File worker stopped unexpectedly"))
-            }
-            _ => return,
-        };
-        self.job = None;
-        match result {
-            Ok(Job::Opened(layer, add, revision)) => {
-                let limit = self.gpu.device.limits().max_texture_dimension_2d;
-                if layer.source.width > limit || layer.source.height > limit {
-                    self.error = Some(format!("Image exceeds this GPU's {limit}px texture limit"));
-                    return;
-                }
-                if add {
-                    if let Err(e) = self.editor.add_layer(layer) {
-                        self.error = Some(e.to_string());
-                        return;
-                    }
-                } else {
-                    match self
-                        .editor
-                        .replace_if_revision(Document::new(layer), revision)
-                    {
-                        Ok(()) => self.fit = true,
-                        Err(document) => {
-                            self.pending = Some(Action::Replace(document));
-                            self.status = "Your work changed while opening the image · choose whether to replace it".into();
-                            return;
-                        }
-                    }
-                }
-                self.status = "Image opened locally · source pixels are preserved".into();
-            }
-            Ok(Job::Exported(path)) => {
-                self.status = format!(
-                    "Exported {} · editable layers remain in memory",
-                    path.file_name().unwrap_or_default().to_string_lossy()
-                )
-            }
-            Ok(Job::Cancelled) => self.status = "File operation cancelled".into(),
-            Err(error) => {
-                self.status = "File operation failed".into();
-                self.error = Some(format!("{error:#}"));
-            }
-        }
-    }
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if text_editor_has_focus(ctx) || self.pending.is_some() || self.error.is_some() {
+        if text_editor_has_focus(ctx)
+            || self.pending.is_some()
+            || self.error.is_some()
+            || self.new_size.is_some()
+        {
             return;
         }
         let command = egui::Modifiers::COMMAND;
@@ -268,8 +128,16 @@ impl Studio {
         } else if shortcut(ctx, command, egui::Key::O) {
             self.request(Action::Open(None, false), ctx);
         }
-        if shortcut(ctx, command, egui::Key::S) {
+        if shortcut(ctx, command_shift, egui::Key::S) {
+            self.save_project(true, ctx);
+        } else if shortcut(ctx, command, egui::Key::S) {
+            self.save_project(false, ctx);
+        }
+        if shortcut(ctx, command_shift, egui::Key::E) {
             self.export(ctx);
+        }
+        if shortcut(ctx, command, egui::Key::N) && self.job.is_none() {
+            self.new_size = Some([1920, 1080]);
         }
         if shortcut(ctx, command_shift, egui::Key::Z) {
             self.editor.redo();
@@ -298,10 +166,26 @@ impl Studio {
                 ui.horizontal_centered(|ui| {
                     ui.label(RichText::new("vibe").size(25.0).strong().color(ACCENT));
                     ui.label(RichText::new("shop").size(25.0).strong());
-                    ui.add_space(24.0);
+                    ui.add_space(16.0);
+                    ui.menu_button("File", |ui| {
+                        if ui
+                            .add_enabled(self.job.is_none(), egui::Button::new("New canvas…"))
+                            .clicked()
+                        {
+                            self.new_size = Some([1920, 1080]);
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(self.job.is_none(), egui::Button::new("Save project as…"))
+                            .clicked()
+                        {
+                            self.save_project(true, ctx);
+                            ui.close();
+                        }
+                    });
                     if ui
-                        .add_enabled(self.job.is_none(), egui::Button::new("Open image"))
-                        .on_hover_text("Open PNG or JPEG · Ctrl/Cmd+O")
+                        .add_enabled(self.job.is_none(), egui::Button::new("Open"))
+                        .on_hover_text("Open project, PNG or JPEG · Ctrl/Cmd+O")
                         .clicked()
                     {
                         self.request(Action::Open(None, false), ctx);
@@ -312,6 +196,13 @@ impl Studio {
                         .clicked()
                     {
                         self.request(Action::Open(None, true), ctx);
+                    }
+                    if ui
+                        .add_enabled(self.job.is_none(), egui::Button::new("Save project"))
+                        .on_hover_text("Ctrl/Cmd+S · saves editable layers")
+                        .clicked()
+                    {
+                        self.save_project(false, ctx);
                     }
                     ui.separator();
                     if ui
@@ -340,7 +231,7 @@ impl Studio {
                                 .fill(ACCENT)
                                 .min_size(egui::vec2(140.0, 34.0)),
                             )
-                            .on_hover_text("Export current pixels · Ctrl/Cmd+S")
+                            .on_hover_text("Export flattened pixels · Ctrl/Cmd+Shift+E")
                             .clicked()
                         {
                             self.export(ctx);
@@ -361,6 +252,10 @@ impl Studio {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("CANVAS").size(10.0).color(ACCENT));
                     ui.add_space(12.0);
+                    if let Some(path) = &self.project_path {
+                        ui.label(path.file_name().unwrap_or_default().to_string_lossy());
+                        ui.separator();
+                    }
                     let d = &self.editor.document;
                     ui.label(format!("{} × {} px", d.width, d.height));
                     ui.label(
@@ -369,7 +264,7 @@ impl Studio {
                             .color(MUTED),
                     );
                     if self.editor.dirty {
-                        ui.label(RichText::new("●  Unsaved layers").color(ACCENT).size(11.0));
+                        ui.label(RichText::new("●  Unsaved changes").color(ACCENT).size(11.0));
                     }
                 });
             });
@@ -432,7 +327,7 @@ impl Studio {
                     if ui.add_enabled(count > 0 && selected > 0, egui::Button::new("Move down")).clicked() { self.editor.edit(|d, s| { d.layers.swap(*s, *s - 1); *s -= 1; }); }
                 });
                 ui.add_space(24.0);
-                ui.label(RichText::new("Your originals stay untouched. Export creates a new PNG; editable project files are not supported in this build.").size(11.0).color(MUTED));
+                ui.label(RichText::new("Save keeps editable layers in a .vibe project. Export PNG creates a flattened copy.").size(11.0).color(MUTED));
             });
         });
     }
@@ -595,45 +490,13 @@ impl Studio {
                 );
             });
     }
-    fn dialogs(&mut self, ctx: &egui::Context) {
-        if self.pending.is_some() {
-            let mut proceed = false;
-            let mut cancel = false;
-            egui::Modal::new(egui::Id::new("unsaved-work")).show(ctx, |ui| {
-                ui.set_max_width(390.0);
-                ui.heading("Keep your work");
-                ui.label("Your editable layers exist only in memory. Export a PNG before discarding them. Export is a flattened image, not an editable project.");
-                ui.add_space(14.0);
-                ui.horizontal(|ui| {
-                    cancel = ui.button("Keep editing").clicked();
-                    proceed = ui.button("Discard layers and continue").clicked();
-                });
-            });
-            if cancel {
-                self.pending = None;
-            }
-            if proceed && let Some(action) = self.pending.take() {
-                self.execute(action, ctx);
-            }
-        }
-        if let Some(error) = self.error.clone() {
-            let mut dismiss = false;
-            egui::Modal::new(egui::Id::new("operation-error")).show(ctx, |ui| {
-                ui.set_max_width(450.0);
-                ui.heading("Could not complete that");
-                ui.label(error);
-                ui.add_space(12.0);
-                dismiss = ui.button("Back to editing").clicked();
-            });
-            if dismiss {
-                self.error = None;
-            }
-        }
-    }
 }
 impl eframe::App for Studio {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        self.poll_job();
+        self.poll_job(ctx);
+        if let Some(path) = self.startup.take() {
+            self.request(Action::Open(Some(path), false), ctx);
+        }
         if ctx.input(|i| i.viewport().close_requested())
             && !self.allow_close
             && (self.editor.dirty || self.job.is_some())

@@ -116,6 +116,14 @@ impl Document {
             layers: vec![layer],
         }
     }
+    pub fn blank(width: u32, height: u32) -> Result<Self> {
+        validate_size(width, height)?;
+        Ok(Self {
+            width,
+            height,
+            layers: Vec::new(),
+        })
+    }
     pub fn validate(&self) -> Result<()> {
         validate_size(self.width, self.height)?;
         ensure!(
@@ -157,14 +165,22 @@ fn source_bytes<'a>(docs: impl Iterator<Item = &'a Document>) -> usize {
         .sum()
 }
 
+struct Snapshot {
+    document: Document,
+    state: u64,
+}
+
 pub struct Editor {
     pub document: Document,
     pub selected: usize,
     pub revision: u64,
     pub dirty: bool,
-    undo: Vec<Document>,
-    redo: Vec<Document>,
-    gesture: Option<Document>,
+    state: u64,
+    next_state: u64,
+    saved_state: Option<u64>,
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
+    gesture: Option<Snapshot>,
 }
 impl Editor {
     pub fn new(document: Document) -> Self {
@@ -173,32 +189,50 @@ impl Editor {
             selected: 0,
             revision: 1,
             dirty: false,
+            state: 0,
+            next_state: 1,
+            saved_state: Some(0),
             undo: Vec::new(),
             redo: Vec::new(),
             gesture: None,
         }
     }
+    pub fn state_id(&self) -> u64 {
+        self.state
+    }
+    pub fn mark_saved(&mut self, state: u64) {
+        self.saved_state = Some(state);
+        self.dirty = self.saved_state != Some(self.state);
+    }
+    pub fn mark_unsaved(&mut self) {
+        self.saved_state = None;
+        self.dirty = true;
+    }
     pub fn begin_edit(&mut self) {
         if self.gesture.is_none() {
-            self.gesture = Some(self.document.clone());
+            self.gesture = Some(self.snapshot());
         }
     }
     pub fn changed(&mut self) {
-        self.revision += 1;
-        self.dirty = true;
+        self.state = self.next_state;
+        self.next_state += 1;
+        self.refresh();
     }
     pub fn finish_edit(&mut self) {
         let Some(before) = self.gesture.take() else {
             return;
         };
-        if before == self.document {
+        if before.document == self.document {
+            self.state = before.state;
+            self.dirty = self.saved_state != Some(self.state);
             return;
         }
         self.undo.push(before);
         self.redo.clear();
         while self.undo.len() > MAX_HISTORY
-            || (source_bytes(std::iter::once(&self.document).chain(self.undo.iter()))
-                > MAX_SOURCE_BYTES
+            || (source_bytes(
+                std::iter::once(&self.document).chain(self.undo.iter().map(|s| &s.document)),
+            ) > MAX_SOURCE_BYTES
                 && !self.undo.is_empty())
         {
             self.undo.remove(0);
@@ -208,14 +242,22 @@ impl Editor {
         self.finish_edit();
         self.begin_edit();
         f(&mut self.document, &mut self.selected);
-        if self.gesture.as_ref() != Some(&self.document) {
+        if self
+            .gesture
+            .as_ref()
+            .is_some_and(|s| s.document != self.document)
+        {
             self.changed();
         }
         self.finish_edit();
         self.clamp_selection();
     }
     pub fn can_undo(&self) -> bool {
-        !self.undo.is_empty() || self.gesture.as_ref().is_some_and(|g| g != &self.document)
+        !self.undo.is_empty()
+            || self
+                .gesture
+                .as_ref()
+                .is_some_and(|s| s.document != self.document)
     }
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
@@ -223,18 +265,15 @@ impl Editor {
     pub fn undo(&mut self) {
         self.finish_edit();
         if let Some(previous) = self.undo.pop() {
-            self.redo
-                .push(std::mem::replace(&mut self.document, previous));
-            self.changed();
-            self.clamp_selection();
+            self.redo.push(self.snapshot());
+            self.restore(previous);
         }
     }
     pub fn redo(&mut self) {
         self.finish_edit();
         if let Some(next) = self.redo.pop() {
-            self.undo.push(std::mem::replace(&mut self.document, next));
-            self.changed();
-            self.clamp_selection();
+            self.undo.push(self.snapshot());
+            self.restore(next);
         }
     }
     pub fn add_layer(&mut self, layer: Layer) -> Result<()> {
@@ -260,8 +299,28 @@ impl Editor {
     }
     pub fn replace(&mut self, document: Document) {
         let revision = self.revision + 1;
+        let state = self.next_state;
         *self = Self::new(document);
         self.revision = revision;
+        self.state = state;
+        self.next_state = state + 1;
+        self.saved_state = Some(state);
+    }
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            document: self.document.clone(),
+            state: self.state,
+        }
+    }
+    fn restore(&mut self, snapshot: Snapshot) {
+        self.document = snapshot.document;
+        self.state = snapshot.state;
+        self.refresh();
+        self.clamp_selection();
+    }
+    fn refresh(&mut self) {
+        self.revision += 1;
+        self.dirty = self.saved_state != Some(self.state);
     }
     fn clamp_selection(&mut self) {
         self.selected = self
