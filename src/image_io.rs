@@ -1,11 +1,7 @@
 use crate::document::{Layer, MAX_DIMENSION, MAX_SOURCE_BYTES, Source, validate_size};
 use anyhow::{Context, Result, ensure};
 use image::{ImageDecoder, ImageEncoder};
-use std::{
-    fs::File,
-    io::{BufReader, Write},
-    path::Path,
-};
+use std::{fs::File, io::BufReader, path::Path};
 
 pub fn open(path: &Path) -> Result<Layer> {
     let file = File::open(path).context("Could not open image")?;
@@ -43,22 +39,13 @@ pub fn save_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<()>
         rgba.len() as u64 == u64::from(width) * u64::from(height) * 4,
         "Invalid export pixels"
     );
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)
-        .context("Could not create export in destination directory")?;
-    image::codecs::png::PngEncoder::new(temporary.as_file_mut()).write_image(
-        rgba,
-        width,
-        height,
-        image::ExtendedColorType::Rgba8,
-    )?;
-    temporary.flush()?;
-    temporary.as_file().sync_all()?;
-    temporary
-        .persist(path)
-        .context("Could not replace export destination; existing file was not truncated")?;
-    Ok(())
+    crate::storage::write_atomic(path, |file| {
+        image::codecs::png::PngEncoder::new(file).write_image(
+            rgba,
+            width,
+            height,
+            image::ExtendedColorType::Rgba8,
+        )?;
+        Ok(())
+    })
 }

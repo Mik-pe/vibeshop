@@ -2,18 +2,19 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 if [[ "${1:-}" != --in-xvfb ]]; then
-    command -v xvfb-run >/dev/null || { echo 'Install xvfb for the isolated native UI smoke test' >&2; exit 1; }
+    missing=0
+    for tool in xvfb-run xauth xdotool import convert; do
+        if ! command -v "$tool" >/dev/null; then echo "Missing UI test tool: $tool (see docs/RUNNER.md)" >&2; missing=1; fi
+    done
+    (( missing == 0 )) || exit 1
     exec xvfb-run -a -s '-screen 0 1600x1100x24' scripts/smoke.sh --in-xvfb
 fi
-for tool in xdotool import convert; do
-    command -v "$tool" >/dev/null || { echo 'Install xdotool and imagemagick for native window capture' >&2; exit 1; }
-done
 cargo build --locked
 mkdir -p artifacts
 rm -f artifacts/studio.png artifacts/moved.png artifacts/undone.png artifacts/redone.png artifacts/exposure.png artifacts/restored.png
 unset EFRAME_SCREENSHOT_TO WAYLAND_DISPLAY
 export WINIT_X11_SCALE_FACTOR=1
-target/debug/vibeshop >artifacts/studio.log 2>&1 &
+"${CARGO_TARGET_DIR:-target}/debug/vibeshop" >artifacts/studio.log 2>&1 &
 pid=$!
 trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window=''
