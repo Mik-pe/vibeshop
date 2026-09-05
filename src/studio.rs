@@ -1,11 +1,14 @@
 use anyhow::{Context, Result};
-use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
+use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
 use std::{path::PathBuf, sync::mpsc::Receiver};
 
 mod files;
+#[cfg(test)]
+mod ui_tests;
+mod workspace;
 use files::{Action, Job};
 use vibeshop::{
-    document::{self, Blend, Editor},
+    document::{self, Editor},
     gpu::Engine,
 };
 
@@ -42,14 +45,25 @@ pub struct Studio {
 }
 impl Studio {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Result<Self> {
-        theme(&cc.egui_ctx);
         let state = cc
             .wgpu_render_state
             .as_ref()
             .context("Vibeshop requires a WebGPU-compatible graphics device")?
             .clone();
+        Ok(Self::from_render_state(
+            &cc.egui_ctx,
+            state,
+            std::env::args_os().nth(1).map(PathBuf::from),
+        ))
+    }
+    fn from_render_state(
+        ctx: &egui::Context,
+        state: eframe::egui_wgpu::RenderState,
+        startup: Option<PathBuf>,
+    ) -> Self {
+        theme(ctx);
         let adapter = state.adapter.get_info();
-        Ok(Self {
+        Self {
             editor: Editor::new(document::demo_document()),
             gpu: Engine::new(state.device.clone(), state.queue.clone()),
             render_state: state,
@@ -64,13 +78,13 @@ impl Studio {
             job: None,
             pending: None,
             allow_close: false,
-            status: "Generated demo · open a photo to make it yours".into(),
+            status: "Generated demo · open a photo to begin".into(),
             error: None,
             adapter: format!("{} · {:?}", adapter.name, adapter.backend),
             project_path: None,
             new_size: None,
-            startup: std::env::args_os().nth(1).map(PathBuf::from),
-        })
+            startup,
+        }
     }
     fn render(&mut self) -> bool {
         if self.rendered_revision == self.editor.revision {
@@ -154,208 +168,8 @@ impl Studio {
             self.fit = true;
         }
     }
-    fn top_bar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("toolbar")
-            .exact_height(66.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(PANEL)
-                    .inner_margin(egui::Margin::symmetric(20, 12)),
-            )
-            .show(ctx, |ui| {
-                ui.horizontal_centered(|ui| {
-                    ui.label(RichText::new("vibe").size(25.0).strong().color(ACCENT));
-                    ui.label(RichText::new("shop").size(25.0).strong());
-                    ui.add_space(16.0);
-                    ui.menu_button("File", |ui| {
-                        if ui
-                            .add_enabled(self.job.is_none(), egui::Button::new("New canvas…"))
-                            .clicked()
-                        {
-                            self.new_size = Some([1920, 1080]);
-                            ui.close();
-                        }
-                        if ui
-                            .add_enabled(self.job.is_none(), egui::Button::new("Save project as…"))
-                            .clicked()
-                        {
-                            self.save_project(true, ctx);
-                            ui.close();
-                        }
-                    });
-                    if ui
-                        .add_enabled(self.job.is_none(), egui::Button::new("Open"))
-                        .on_hover_text("Open project, PNG or JPEG · Ctrl/Cmd+O")
-                        .clicked()
-                    {
-                        self.request(Action::Open(None, false), ctx);
-                    }
-                    if ui
-                        .add_enabled(self.job.is_none(), egui::Button::new("+ Add layer"))
-                        .on_hover_text("Ctrl/Cmd+Shift+O")
-                        .clicked()
-                    {
-                        self.request(Action::Open(None, true), ctx);
-                    }
-                    if ui
-                        .add_enabled(self.job.is_none(), egui::Button::new("Save project"))
-                        .on_hover_text("Ctrl/Cmd+S · saves editable layers")
-                        .clicked()
-                    {
-                        self.save_project(false, ctx);
-                    }
-                    ui.separator();
-                    if ui
-                        .add_enabled(self.editor.can_undo(), egui::Button::new("Undo"))
-                        .on_hover_text("Ctrl/Cmd+Z")
-                        .clicked()
-                    {
-                        self.editor.undo();
-                    }
-                    if ui
-                        .add_enabled(self.editor.can_redo(), egui::Button::new("Redo"))
-                        .on_hover_text("Ctrl/Cmd+Shift+Z")
-                        .clicked()
-                    {
-                        self.editor.redo();
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add_enabled(
-                                self.job.is_none(),
-                                egui::Button::new(
-                                    RichText::new("Export PNG  ↗")
-                                        .color(Color32::from_rgb(24, 31, 19))
-                                        .strong(),
-                                )
-                                .fill(ACCENT)
-                                .min_size(egui::vec2(140.0, 34.0)),
-                            )
-                            .on_hover_text("Export flattened pixels · Ctrl/Cmd+Shift+E")
-                            .clicked()
-                        {
-                            self.export(ctx);
-                        }
-                        ui.add_space(12.0);
-                        ui.label(RichText::new("LOCAL FIRST").size(10.0).color(MUTED));
-                    });
-                });
-            });
-        egui::TopBottomPanel::top("document")
-            .exact_height(38.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(Color32::from_rgb(23, 25, 29))
-                    .inner_margin(egui::Margin::symmetric(20, 8)),
-            )
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("CANVAS").size(10.0).color(ACCENT));
-                    ui.add_space(12.0);
-                    if let Some(path) = &self.project_path {
-                        ui.label(path.file_name().unwrap_or_default().to_string_lossy());
-                        ui.separator();
-                    }
-                    let d = &self.editor.document;
-                    ui.label(format!("{} × {} px", d.width, d.height));
-                    ui.label(
-                        RichText::new("sRGB input · linear 16F composition")
-                            .size(11.0)
-                            .color(MUTED),
-                    );
-                    if self.editor.dirty {
-                        ui.label(RichText::new("●  Unsaved changes").color(ACCENT).size(11.0));
-                    }
-                });
-            });
-    }
-    fn inspector(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::right("inspector").default_width(292.0).min_width(260.0).max_width(380.0).resizable(true).frame(egui::Frame::new().fill(PANEL).inner_margin(18)).show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.add_space(6.0); ui.heading("Make it yours.");
-                ui.label(RichText::new("Non-destructive adjustments").color(MUTED).size(12.0)); ui.add_space(24.0);
-                let selected = self.editor.selected;
-                if let Some(original) = self.editor.document.layers.get(selected) {
-                    let mut layer = original.clone();
-                    ui.label(RichText::new("LIGHT & COLOR").color(MUTED).size(10.0).strong()); ui.add_space(12.0);
-                    slider(ui, "Exposure", &mut layer.exposure, -5.0..=5.0, " EV");
-                    slider(ui, "Contrast", &mut layer.contrast, 0.0..=2.0, "×");
-                    slider(ui, "Saturation", &mut layer.saturation, 0.0..=2.0, "×");
-                    ui.add_space(4.0);
-                    if ui.button("Reset adjustments").clicked() { layer.reset_adjustments(); }
-                    ui.add_space(20.0); ui.separator(); ui.add_space(14.0);
-                    ui.label(RichText::new("COMPOSITION").color(MUTED).size(10.0).strong()); ui.add_space(12.0);
-                    slider(ui, "Opacity", &mut layer.opacity, 0.0..=1.0, "");
-                    egui::ComboBox::from_id_salt("blend").selected_text(layer.blend.name()).width(ui.available_width() - 8.0).show_ui(ui, |ui| {
-                        for blend in Blend::ALL { ui.selectable_value(&mut layer.blend, blend, blend.name()); }
-                    });
-                    ui.add_space(12.0);
-                    ui.horizontal(|ui| {
-                        ui.label("X"); ui.add(egui::DragValue::new(&mut layer.offset[0]).range(-8192..=8192));
-                        ui.label("Y"); ui.add(egui::DragValue::new(&mut layer.offset[1]).range(-8192..=8192));
-                    });
-                    if &layer != original {
-                        self.editor.begin_edit(); self.editor.document.layers[selected] = layer; self.editor.changed();
-                    }
-                } else { ui.label("Add a layer to start editing."); }
-                ui.add_space(22.0); ui.separator(); ui.add_space(16.0);
-                ui.horizontal(|ui| { ui.label(RichText::new("LAYERS").size(10.0).strong().color(MUTED)); ui.label(RichText::new(format!("{}", self.editor.document.layers.len())).size(10.0).color(ACCENT)); });
-                ui.add_space(10.0);
-                for index in (0..self.editor.document.layers.len()).rev() {
-                    let layer = &self.editor.document.layers[index];
-                    let mut visible = layer.visible; let name = layer.name.clone();
-                    let active = index == self.editor.selected;
-                    let fill = if active { Color32::from_rgb(49, 56, 46) } else { Color32::from_rgb(36, 38, 43) };
-                    egui::Frame::new().fill(fill).corner_radius(7).inner_margin(10).show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            if ui.checkbox(&mut visible, "").on_hover_text("Layer visibility").changed() { self.editor.edit(|d, _| d.layers[index].visible = visible); }
-                            if ui.add(egui::Button::new(RichText::new(name).size(12.0)).selected(active).frame(false).wrap()).clicked() { self.editor.finish_edit(); self.editor.selected = index; }
-                        });
-                    }); ui.add_space(5.0);
-                }
-                let count = self.editor.document.layers.len(); let selected = self.editor.selected;
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if ui.add_enabled(count > 0 && count < document::MAX_LAYERS, egui::Button::new("Duplicate")).clicked() {
-                        let mut layer = self.editor.document.layers[selected].clone(); layer.name = format!("{} copy", layer.name);
-                        if let Err(e) = self.editor.add_layer(layer) { self.error = Some(e.to_string()); }
-                    }
-                    if ui.add_enabled(count > 0, egui::Button::new("Delete")).clicked() { self.editor.edit(|d, s| { d.layers.remove(*s); }); }
-                });
-                ui.horizontal(|ui| {
-                    if ui.add_enabled(selected + 1 < count, egui::Button::new("Move up")).clicked() { self.editor.edit(|d, s| { d.layers.swap(*s, *s + 1); *s += 1; }); }
-                    if ui.add_enabled(count > 0 && selected > 0, egui::Button::new("Move down")).clicked() { self.editor.edit(|d, s| { d.layers.swap(*s, *s - 1); *s -= 1; }); }
-                });
-                ui.add_space(24.0);
-                ui.label(RichText::new("Save keeps editable layers in a .vibe project. Export PNG creates a flattened copy.").size(11.0).color(MUTED));
-            });
-        });
-    }
     fn canvas(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::left("tools")
-            .exact_width(68.0)
-            .resizable(false)
-            .frame(egui::Frame::new().fill(PANEL).inner_margin(10))
-            .show(ctx, |ui| {
-                ui.add_space(15.0);
-                for (tool, key, label) in [(Tool::Hand, "H", "Pan"), (Tool::Move, "V", "Move")] {
-                    if ui
-                        .add_sized(
-                            [46.0, 42.0],
-                            egui::Button::new(RichText::new(key).strong().size(18.0))
-                                .selected(self.tool == tool),
-                        )
-                        .on_hover_text(format!("{label} · {key}"))
-                        .clicked()
-                    {
-                        self.tool = tool;
-                    }
-                    ui.vertical_centered(|ui| {
-                        ui.label(RichText::new(label).size(10.0).color(MUTED));
-                    });
-                    ui.add_space(18.0);
-                }
-            });
+        self.tool_bar(ctx);
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
@@ -371,13 +185,16 @@ impl Studio {
                     self.editor.document.height as f32,
                 );
                 if self.fit {
-                    self.zoom = ((rect.width() - 100.0) * pixels_per_point / dimensions.x)
-                        .min((rect.height() - 110.0) * pixels_per_point / dimensions.y)
+                    self.zoom = ((rect.width() - 64.0) * pixels_per_point / dimensions.x)
+                        .min((rect.height() - 64.0) * pixels_per_point / dimensions.y)
                         .clamp(0.02, 16.0);
                     self.pan = Vec2::ZERO;
                 }
-                if response.hovered() {
-                    let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
+                let blocked =
+                    self.pending.is_some() || self.error.is_some() || self.new_size.is_some();
+                if response.hovered() && !blocked {
+                    // Wheel input must not keep undoing an explicit Fit command.
+                    let scroll = ctx.input(|i| i.raw_scroll_delta.y);
                     if scroll.abs() > 0.0 {
                         let old = self.zoom;
                         self.zoom = (old * (scroll * 0.002).exp()).clamp(0.02, 16.0);
@@ -387,13 +204,14 @@ impl Studio {
                         self.fit = false;
                     }
                 }
-                let panning =
-                    self.tool == Tool::Hand || ctx.input(|i| i.key_down(egui::Key::Space));
-                if response.dragged() && panning {
+                let panning = self.tool == Tool::Hand
+                    || (!text_editor_has_focus(ctx) && ctx.input(|i| i.key_down(egui::Key::Space)));
+                if response.dragged() && panning && !blocked {
                     self.pan += response.drag_delta();
                     self.fit = false;
                 }
                 if response.drag_started()
+                    && !blocked
                     && !panning
                     && let (Some(pointer), Some(layer)) = (
                         ctx.input(|i| i.pointer.press_origin()),
@@ -404,6 +222,7 @@ impl Studio {
                     self.editor.begin_edit();
                 }
                 if response.dragged()
+                    && !blocked
                     && !panning
                     && let (Some((start, offset)), Some(pointer)) =
                         (self.move_start, response.interact_pointer_pos())
@@ -424,7 +243,7 @@ impl Studio {
                     self.move_start = None;
                     self.editor.finish_edit();
                 }
-                if response.double_clicked() {
+                if response.double_clicked() && !blocked {
                     self.fit = true;
                 }
                 response.on_hover_cursor(if panning {
@@ -474,25 +293,9 @@ impl Studio {
                     Stroke::new(1.0_f32, Color32::from_gray(76)),
                     egui::StrokeKind::Outside,
                 );
-                painter.text(
-                    rect.left_top() + egui::vec2(24.0, 22.0),
-                    egui::Align2::LEFT_TOP,
-                    "YOUR NEXT GOOD IDEA STARTS HERE",
-                    egui::FontId::proportional(10.0),
-                    MUTED,
-                );
-                painter.text(
-                    rect.center_bottom() - egui::vec2(0.0, 24.0),
-                    egui::Align2::CENTER_BOTTOM,
-                    "Scroll to zoom   ·   Space + drag to pan   ·   F to fit",
-                    egui::FontId::proportional(11.0),
-                    MUTED,
-                );
             });
     }
-}
-impl eframe::App for Studio {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn show(&mut self, ctx: &egui::Context) {
         self.poll_job(ctx);
         if let Some(path) = self.startup.take() {
             self.request(Action::Open(Some(path), false), ctx);
@@ -509,24 +312,28 @@ impl eframe::App for Studio {
             self.request(Action::Open(Some(path), false), ctx);
         }
         self.top_bar(ctx);
-        egui::TopBottomPanel::bottom("status").exact_height(32.0).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::symmetric(16, 7))).show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("●").color(ACCENT));
-                ui.label(RichText::new(&self.status).size(11.0).color(MUTED));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("Fit").clicked() { self.fit = true; }
-                    if ui.small_button(format!("{:.0}%", self.zoom * 100.0)).on_hover_text("Click for 100% / one image pixel per physical screen pixel").clicked() { self.zoom = 1.0; self.pan = Vec2::ZERO; self.fit = false; }
-                    ui.label(RichText::new(format!("UI {:.1} ms", frame.info().cpu_usage.unwrap_or(0.0) * 1000.0)).size(10.0).color(MUTED)).on_hover_text("CPU time for UI generation, not GPU latency or a performance benchmark");
-                    ui.label(RichText::new("GPU").size(10.0).color(ACCENT)).on_hover_text(format!("{}\n{} compositions · {} source uploads", self.adapter, self.gpu.renders, self.gpu.uploads));
-                });
-            });
-        });
+        self.status_bar(ctx);
         self.inspector(ctx);
         self.canvas(ctx);
         if !ctx.input(|i| i.pointer.any_down()) {
             self.editor.finish_edit();
         }
+        if (self.error.is_some() || self.pending.is_some() || self.new_size.is_some())
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            if self.error.is_some() {
+                self.error = None;
+            } else if self.job.is_none() {
+                self.pending = None;
+                self.new_size = None;
+            }
+        }
         self.dialogs(ctx);
+    }
+}
+impl eframe::App for Studio {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.show(ctx);
     }
 }
 fn shortcut(ctx: &egui::Context, modifiers: egui::Modifiers, key: egui::Key) -> bool {
@@ -549,21 +356,6 @@ fn png_destination(path: &std::path::Path) -> Result<PathBuf> {
 fn zoom_pan(pan: Vec2, anchor: Vec2, ratio: f32) -> Vec2 {
     anchor - (anchor - pan) * ratio
 }
-fn slider(
-    ui: &mut egui::Ui,
-    label: &str,
-    value: &mut f32,
-    range: std::ops::RangeInclusive<f32>,
-    suffix: &str,
-) {
-    ui.label(RichText::new(label).size(12.0));
-    ui.add(
-        egui::Slider::new(value, range)
-            .suffix(suffix)
-            .fixed_decimals(2),
-    );
-    ui.add_space(10.0);
-}
 fn theme(ctx: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = PANEL;
@@ -578,9 +370,15 @@ fn theme(ctx: &egui::Context) {
     ctx.set_visuals(visuals);
     ctx.style_mut(|style| {
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-        style.spacing.button_padding = egui::vec2(12.0, 7.0);
+        style.spacing.button_padding = egui::vec2(10.0, 6.0);
         style.spacing.slider_width = 170.0;
         style.spacing.interact_size.y = 28.0;
+        style
+            .text_styles
+            .insert(egui::TextStyle::Body, egui::FontId::proportional(13.0));
+        style
+            .text_styles
+            .insert(egui::TextStyle::Button, egui::FontId::proportional(13.0));
     });
 }
 #[cfg(test)]
