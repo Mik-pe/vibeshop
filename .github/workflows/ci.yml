@@ -16,7 +16,6 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       WGPU_BACKEND: vulkan
-      XDG_RUNTIME_DIR: ${{ runner.temp }}/vibeshop-runtime-${{ github.run_id }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -25,8 +24,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$XDG_RUNTIME_DIR" artifacts
-          chmod 700 "$XDG_RUNTIME_DIR"
+          runtime="$RUNNER_TEMP/vibeshop-runtime-$GITHUB_RUN_ID"
+          mkdir -p "$runtime" artifacts
+          chmod 700 "$runtime"
+          printf 'XDG_RUNTIME_DIR=%s\n' "$runtime" >> "$GITHUB_ENV"
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           printf 'Runner: %s\nCommit: %s\n' "$RUNNER_NAME" "$GITHUB_SHA" | tee artifacts/run.txt
           git archive --format=zip --output=artifacts/source.zip HEAD
@@ -67,4 +68,4 @@ jobs:
       - name: Remove this run's temporary runtime directory
         if: always()
         shell: bash
-        run: rmdir "$XDG_RUNTIME_DIR" || true
+        run: rmdir "$RUNNER_TEMP/vibeshop-runtime-$GITHUB_RUN_ID" || true
