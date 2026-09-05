@@ -182,3 +182,43 @@ fn late_open_and_save_results_do_not_discard_newer_edits() {
     assert!(matches!(app.pending, Some(Action::Replace(_))));
     assert_eq!(app.editor.document, before);
 }
+
+#[test]
+fn saving_mid_drag_keeps_later_motion_undoable_back_to_the_saved_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut app, ctx) = studio();
+    app.project_path = Some(directory.path().join("drag.vibe"));
+    app.editor
+        .add_layer(Layer::new(
+            "Moving layer",
+            Source::new(1, 1, vec![1, 2, 3, 255]).unwrap(),
+        ))
+        .unwrap();
+    app.editor.begin_edit();
+    app.editor.document.layers[0].offset = [2, 0];
+    app.editor.changed();
+    ctx.begin_pass(egui::RawInput {
+        events: vec![egui::Event::PointerButton {
+            pos: egui::pos2(100.0, 100.0),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        }],
+        ..Default::default()
+    });
+    assert!(ctx.input(|input| input.pointer.any_down()));
+    app.save_project(false, &ctx);
+    let _ = ctx.end_pass();
+    app.editor.document.layers[0].offset = [4, 0];
+    app.editor.changed();
+    app.editor.finish_edit();
+    drain(&mut app, &ctx);
+    assert!(app.error.is_none(), "{:?}", app.error);
+    assert!(app.editor.dirty);
+    app.editor.undo();
+    assert_eq!(app.editor.document.layers[0].offset, [2, 0]);
+    assert!(!app.editor.dirty);
+    app.editor.redo();
+    assert_eq!(app.editor.document.layers[0].offset, [4, 0]);
+    assert!(app.editor.dirty);
+}
