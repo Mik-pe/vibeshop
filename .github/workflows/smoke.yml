@@ -1,11 +1,13 @@
 name: runner-smoke
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
+permissions: {}
 jobs:
   smoke:
-    runs-on: [self-hosted, vibeshop]
+    if: github.repository == 'Mik-pe/vibeshop'
+    runs-on: [self-hosted, Linux, X64, vibeshop]
+    timeout-minutes: 2
     steps:
-      - name: hello
-        run: echo "hello from $(hostname) — runner labels work"
+      - name: Identify selected runner
+        shell: bash
+        run: printf 'Runner %s is reachable.\n' "$RUNNER_NAME"

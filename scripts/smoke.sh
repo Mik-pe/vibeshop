@@ -2,18 +2,22 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 if [[ "${1:-}" != --in-xvfb ]]; then
-    command -v xvfb-run >/dev/null || { echo 'Install xvfb for the isolated native UI smoke test' >&2; exit 1; }
+    missing=0
+    for tool in xvfb-run xauth xdotool import convert; do
+        if ! command -v "$tool" >/dev/null; then echo "Missing UI test tool: $tool (see docs/RUNNER.md)" >&2; missing=1; fi
+    done
+    (( missing == 0 )) || exit 1
     exec xvfb-run -a -s '-screen 0 1600x1100x24' scripts/smoke.sh --in-xvfb
 fi
-for tool in xdotool import convert; do
-    command -v "$tool" >/dev/null || { echo 'Install xdotool and imagemagick for native window capture' >&2; exit 1; }
-done
 cargo build --locked
 mkdir -p artifacts
 rm -f artifacts/studio.png artifacts/moved.png artifacts/undone.png artifacts/redone.png artifacts/exposure.png artifacts/restored.png
 unset EFRAME_SCREENSHOT_TO WAYLAND_DISPLAY
 export WINIT_X11_SCALE_FACTOR=1
-target/debug/vibeshop >artifacts/studio.log 2>&1 &
+# Xvfb has no DRI3. Copy presentation through Mesa's software WSI path while
+# keeping the same Vulkan image operations. This is not a latency benchmark.
+export MESA_VK_WSI_DEBUG=sw
+"${CARGO_TARGET_DIR:-target}/debug/vibeshop" >artifacts/studio.log 2>&1 &
 pid=$!
 trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 window=''
@@ -26,8 +30,7 @@ done
 [[ -n "$window" ]] || { echo 'Editor window did not appear' >&2; cat artifacts/studio.log; exit 1; }
 xdotool windowsize "$window" 1440 940
 xdotool windowfocus --sync "$window"
-# The fixed window and generated demo make this a small native-input regression,
-# not a timing benchmark or a substitute for broader accessibility-driven tests.
+# Fixed layout and generated pixels make this a native-input correctness check.
 sleep 2
 capture() {
     sleep 0.8
@@ -58,10 +61,17 @@ capture redone
 [[ "$(canvas_hash redone)" == "$moved" ]] || { echo 'Redo did not restore the moved layer' >&2; exit 1; }
 xdotool key --clearmodifiers ctrl+z
 sleep 0.3
-xdotool mousemove --window "$window" 1292 268 click 1
+xdotool mousemove --sync --window "$window" 1292 268
+sleep 0.1
+xdotool mousedown 1
+sleep 0.15
+xdotool mouseup 1
 capture exposure
 [[ "$(canvas_hash exposure)" != "$original" ]] || { echo 'Exposure control did not change rendered pixels' >&2; exit 1; }
-xdotool mousemove --window "$window" 600 400 click 1
+xdotool mousemove --sync --window "$window" 600 400
+xdotool mousedown 1
+sleep 0.15
+xdotool mouseup 1
 xdotool key --clearmodifiers ctrl+z
 capture restored
 [[ "$(canvas_hash restored)" == "$original" ]] || { echo 'Undo did not restore exposure' >&2; exit 1; }
