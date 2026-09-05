@@ -16,7 +16,7 @@ On Ubuntu/Debian, install the native build/runtime dependencies first:
 sudo apt-get install build-essential pkg-config libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev libvulkan1 mesa-vulkan-drivers
 ```
 
-A working Vulkan, Metal, or DirectX 12 adapter is required. Linux file dialogs use your desktop's XDG portal. The native application starts with an original generated dune study; no sample download, account, API key, or network service is required.
+A working Vulkan, Metal, or DirectX 12 adapter is required. Linux file dialogs use your desktop's XDG portal. The native application starts with an original generated dune study; no sample download, account, API key, or network service is required. Linux is the initial CI-verified platform; macOS and Windows still need the platform verification in issue #10.
 
 ## What this build does
 
@@ -30,11 +30,12 @@ Open PNG/JPEG or drop a file onto the canvas. Add, duplicate, delete, reorder, h
 
 ```sh
 scripts/check.sh
-# Linux GUI smoke capture (also needs xvfb):
+# Linux native interaction checks in an isolated X11 display:
+sudo apt-get install xvfb xdotool imagemagick
 scripts/smoke.sh
 ```
 
-The checks include real GPU pixel comparisons; no adapter means failure, not a silently skipped test. The smoke command launches the actual editor and writes `artifacts/studio.png`. Inspect it and exercise changed controls before claiming UI behavior works. Mesa CI verifies correctness, not performance leadership.
+The checks include real GPU pixel comparisons; no adapter means failure, not a silently skipped test. The smoke command launches the actual editor, moves a layer with native input, checks undo/redo against captured canvas pixels, changes exposure, and verifies undo again. It writes the actual window and interaction captures to `artifacts/`. This small fixed-layout smoke test does not yet automate file dialogs or every editing control; issue #5 owns broader interaction coverage. Inspect captures and exercise the affected controls before claiming UI behavior works. Mesa CI verifies correctness, not performance leadership.
 
 ## Agent-only development
 
@@ -48,6 +49,6 @@ Read AGENTS.md and execute .agents/skills/issue-worker/SKILL.md.
 Read AGENTS.md and execute .agents/skills/pr-triage/SKILL.md.
 ```
 
-The issue worker ships a tested vertical slice as a PR. PR triage independently reviews/merges ready work and repairs rejected, drifted, or failing PRs. Expiring Git-backed per-task leases coordinate agents across machines. There is no extra scheduler, database, model API dependency, or hidden lock service. Schedules and credentials belong to your chosen agent runner; this repository does not secretly enable them.
+The issue worker ships a tested vertical slice as a PR. PR triage independently reviews/merges ready work and repairs rejected, drifted, or failing PRs. Expiring Git-backed per-task leases coordinate agents across machines. There is no extra scheduler, database, model API dependency, or hidden lock service. Schedules and credentials belong to your chosen agent runner; this repository does not secretly enable them. Server-side branch protection and independent review identities are tracked in issue #11 and must be configured by an authorized owner.
 
 [GitHub issues](https://github.com/Mik-pe/vibeshop/issues) track the next complete user workflows. Unsupported features stay out of the UI until they work.
