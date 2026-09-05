@@ -1,7 +1,7 @@
 name: CI
 on:
   push:
-    branches: [main, 'agent/**']
+    branches: [main]
   pull_request:
 permissions:
   contents: read
@@ -27,23 +27,28 @@ jobs:
           mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
       - name: Toolchain
         run: rustup show
-      - name: Resolve initial lockfile
-        run: cargo generate-lockfile
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
+      - name: Resolve bootstrap lockfile
+        run: test -f Cargo.lock || cargo generate-lockfile
       - name: Compile and test real GPU pixels
         run: cargo test --locked --all-targets -- --nocapture
       - name: Lints
+        if: ${{ !cancelled() }}
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Formatting
+        if: ${{ !cancelled() }}
         run: cargo fmt --all -- --check
-      - name: Bootstrap diagnostics
-        if: always()
-        run: |
-          cargo fmt --all
-          mkdir -p artifacts
-          git diff > artifacts/formatting.patch
-          cp Cargo.lock artifacts/Cargo.lock
+      - name: Cross-machine agent coordination
+        if: ${{ !cancelled() }}
+        run: scripts/test-leases.sh
+      - name: Launch actual editor
+        if: ${{ !cancelled() }}
+        run: scripts/smoke.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: bootstrap-diagnostics
+          name: editor-evidence
           path: artifacts/
+          if-no-files-found: warn
