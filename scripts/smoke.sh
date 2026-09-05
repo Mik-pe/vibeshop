@@ -61,7 +61,8 @@ capture redone
 [[ "$(canvas_hash redone)" == "$moved" ]] || { echo 'Redo did not restore the moved layer' >&2; exit 1; }
 xdotool key --clearmodifiers ctrl+z
 sleep 0.3
-xdotool mousemove --sync --window "$window" 1292 268
+# Exposure track in the 1440x940 compact workspace, right of its neutral midpoint.
+xdotool mousemove --sync --window "$window" 1330 219
 sleep 0.1
 xdotool mousedown 1
 sleep 0.15
