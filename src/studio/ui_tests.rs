@@ -543,6 +543,70 @@ fn keyboard_focus_and_activation_work_like_assistive_technology() {
 }
 
 #[test]
+fn curve_editor_drags_bend_pixels_and_histogram_follows() {
+    // Tall enough that the tone panel's curve editor is fully on screen.
+    let mut h = Harness::new([1000, 900], 1.0);
+    let before = h.app.editor.document.layers[0].clone();
+    let before_doc = h.app.editor.document.clone();
+    // The curve editor canvas sits under the CURVES section; reach it by
+    // its accessible name through the accesskit tree.
+    let rect = h.rect("Tone curve editor, RGB");
+    // Drag the midtone part of the curve downward (screen y grows down).
+    let start = egui::pos2(rect.left() + rect.width() * 0.4, rect.center().y);
+    h.drag(
+        start,
+        egui::pos2(start.x + 40.0, rect.center().y + rect.height() * 0.35),
+    );
+    let after = h.app.editor.document.layers[0].clone();
+    assert!(
+        after.curves[0] != before.curves[0],
+        "dragging inside the editor must define curve control points"
+    );
+    assert!(
+        !after.curves[0].is_neutral(),
+        "the edited curve must have defined points"
+    );
+    // The histogram of the edited composition arrives without blocking.
+    for _ in 0..30 {
+        h.frame(Vec::new());
+        if h.app.histogram_rows.is_some() {
+            break;
+        }
+    }
+    h.capture("workspace-curves");
+    // Scroll the properties panel to reveal levels + histogram.
+    h.frame(vec![Event::PointerMoved(egui::pos2(850.0, 300.0))]);
+    for _ in 0..6 {
+        h.frame(vec![Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -120.0),
+            modifiers: Modifiers::NONE,
+        }]);
+    }
+    h.frame(Vec::new());
+    h.frame(Vec::new());
+    h.capture("workspace-histogram");
+    let rows = h
+        .app
+        .histogram_rows
+        .expect("the GPU histogram must arrive after an edit");
+    let total: u64 = rows[0].iter().map(|count| u64::from(*count)).sum();
+    assert!(total > 0, "the luminance histogram must count pixels");
+    // The whole drag is one gesture: a single undo restores everything.
+    h.key(egui::Key::Z, Modifiers::COMMAND);
+    assert_eq!(
+        h.app.editor.document, before_doc,
+        "one undo must restore the pre-drag document"
+    );
+    for _ in 0..30 {
+        h.frame(Vec::new());
+        if h.app.histogram_revision == h.app.editor.revision && h.app.histogram.is_none() {
+            break;
+        }
+    }
+}
+
+#[test]
 fn modal_dialogs_block_shortcuts_from_behind() {
     let mut h = Harness::new([1000, 640], 1.0);
     h.click(&format!("{} Duplicate", icons::DUPLICATE));

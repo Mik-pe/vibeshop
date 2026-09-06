@@ -10,7 +10,9 @@ use crate::document::{
 };
 
 const MAGIC: &[u8; 8] = b"VIBESHOP";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
+/// Version 1 predates levels and curves; those layers read as neutral.
+const READ_VERSIONS: [u32; 2] = [1, 2];
 const MAX_NAME: usize = 4096;
 pub const MAX_FILE_BYTES: u64 = MAX_SOURCE_BYTES as u64 + 1024 * 1024;
 
@@ -75,6 +77,16 @@ pub fn write_to(writer: &mut impl Write, document: &Document) -> Result<()> {
         for offset in layer.offset {
             writer.write_all(&offset.to_le_bytes())?;
         }
+        // Version 2: master levels then every curve control value. NaN
+        // marks untouched points so neutral curves round-trip exactly.
+        for value in [layer.levels.black, layer.levels.gamma, layer.levels.white] {
+            writer.write_all(&value.to_le_bytes())?;
+        }
+        for curve in &layer.curves {
+            for point in curve.points() {
+                writer.write_all(&point.to_le_bytes())?;
+            }
+        }
     }
     Ok(())
 }
@@ -87,7 +99,11 @@ pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Document> {
     );
     reader.rewind()?;
     ensure!(&read_array::<8>(reader)? == MAGIC, "Not a Vibeshop project");
-    ensure!(read_u32(reader)? == VERSION, "Unsupported project version");
+    let version = read_u32(reader)?;
+    ensure!(
+        READ_VERSIONS.contains(&version),
+        "Unsupported project version"
+    );
     let width = read_u32(reader)?;
     let height = read_u32(reader)?;
     validate_size(width, height)?;
@@ -164,6 +180,27 @@ pub fn read_from(reader: &mut (impl Read + Seek)) -> Result<Document> {
                 i32::from_le_bytes(read_array(reader)?),
                 i32::from_le_bytes(read_array(reader)?),
             ],
+            levels: if version >= 2 {
+                let bytes: [u8; 12] = read_array(reader)?;
+                crate::curves::Levels {
+                    black: f32::from_le_bytes(bytes[0..4].try_into()?),
+                    gamma: f32::from_le_bytes(bytes[4..8].try_into()?),
+                    white: f32::from_le_bytes(bytes[8..12].try_into()?),
+                }
+            } else {
+                Default::default()
+            },
+            curves: if version >= 2 {
+                let mut curves: [crate::curves::Curve; 4] = Default::default();
+                for curve in curves.iter_mut() {
+                    for point in curve.points_mut().iter_mut() {
+                        *point = f32::from_le_bytes(read_array(reader)?);
+                    }
+                }
+                curves
+            } else {
+                Default::default()
+            },
         });
     }
     ensure!(used.iter().all(|used| *used), "Unused project asset");

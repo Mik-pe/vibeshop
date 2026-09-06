@@ -4,7 +4,8 @@ use super::{
     icons,
     icons::{TEXT, TEXT_MUTED},
 };
-use eframe::egui::{self, Color32, RichText, Vec2};
+use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
+use vibeshop::curves::{Channel, Curve};
 use vibeshop::document::{self, Blend};
 
 impl Studio {
@@ -209,7 +210,7 @@ impl Studio {
         section(ui, "PROPERTIES");
         ui.add_space(8.0);
         let selected = self.editor.selected;
-        let Some(original) = self.editor.document.layers.get(selected) else {
+        let Some(original) = self.editor.document.layers.get(selected).cloned() else {
             ui.label(RichText::new("No layer selected").color(MUTED));
             ui.label("Add an image to start editing.");
             return;
@@ -232,6 +233,9 @@ impl Studio {
         control(ui, "Contrast", &mut layer.contrast, 0.0..=2.0, "×").labelled_by(contrast.id);
         let saturation = ui.label(icons::glyph(icons::SATURATION, 15.0).color(TEXT_MUTED));
         control(ui, "Saturation", &mut layer.saturation, 0.0..=2.0, "×").labelled_by(saturation.id);
+        ui.add_space(8.0);
+        self.tone_panel(ui);
+        ui.add_space(8.0);
         if ui.small_button("Reset color adjustments").clicked() {
             layer.reset_adjustments();
         }
@@ -270,7 +274,7 @@ impl Studio {
             )
             .labelled_by(y.id);
         });
-        if &layer != original {
+        if layer != original {
             self.editor.begin_edit();
             self.editor.document.layers[selected] = layer;
             self.editor.changed();
@@ -563,6 +567,263 @@ impl Studio {
 }
 fn section(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(text).size(10.0).strong().color(MUTED));
+}
+
+/// One channel of the histogram, scaled so the tallest bin fills the plot.
+fn histogram_row(ui: &mut egui::Ui, bins: &[u32; 256], color: Color32, height: f32) {
+    let peak = bins.iter().copied().max().unwrap_or(1).max(1) as f32;
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 2.0, Color32::from_black_alpha(60));
+    let bar_width = rect.width() / 256.0;
+    for (bin, count) in bins.iter().enumerate() {
+        if *count == 0 {
+            continue;
+        }
+        let bar_height = rect.height() * (*count as f32 / peak).clamp(0.004, 1.0);
+        painter.rect_filled(
+            Rect::from_min_size(
+                egui::pos2(
+                    rect.left() + bin as f32 * bar_width,
+                    rect.bottom() - bar_height,
+                ),
+                egui::vec2(bar_width.max(1.0), bar_height),
+            ),
+            0.0,
+            color.gamma_multiply(0.85),
+        );
+    }
+}
+
+/// Master levels, per-channel curves with a draggable editor, the GPU
+/// histogram of the final composition, and a before/after compare toggle.
+impl Studio {
+    fn tone_panel(&mut self, ui: &mut egui::Ui) {
+        section(ui, "CURVES");
+        ui.add_space(6.0);
+        // Channel picker as a selectable row of named tabs.
+        ui.horizontal(|ui| {
+            for (index, channel) in Channel::ALL.iter().enumerate() {
+                let selected = self.curve_channel == index;
+                if ui
+                    .add(
+                        egui::Button::new(RichText::new(channel.name()).size(11.0))
+                            .selected(selected)
+                            .min_size(egui::vec2(0.0, 22.0)),
+                    )
+                    .clicked()
+                {
+                    self.curve_channel = index;
+                    self.curve_handle = None;
+                }
+            }
+        });
+        ui.add_space(4.0);
+        let selected = self.editor.selected;
+        let Some(original) = self.editor.document.layers.get(selected).cloned() else {
+            return;
+        };
+        let mut layer = original.clone();
+        let curve = &mut layer.curves[self.curve_channel];
+        // The editor mutates the layer copy; commit happens below.
+        let response = self.curve_editor(ui, curve);
+        // Keyboard editing of the active handle: arrows move in 1/255 steps,
+        // Shift = 10x, Delete removes the point, Escape drops the handle.
+        if let Some(handle) = self.curve_handle {
+            if response.has_focus() {
+                let step = ui.input(|input| {
+                    let modifier = if input.modifiers.shift {
+                        10.0 / 255.0
+                    } else {
+                        1.0 / 255.0
+                    };
+                    let vertical = input.key_pressed(egui::Key::ArrowUp) as i8
+                        - input.key_pressed(egui::Key::ArrowDown) as i8;
+                    let horizontal = input.key_pressed(egui::Key::ArrowRight) as i8
+                        - input.key_pressed(egui::Key::ArrowLeft) as i8;
+                    (vertical, horizontal, modifier)
+                });
+                let (vertical, horizontal, modifier) = step;
+                if vertical != 0 || horizontal != 0 {
+                    let x = (handle as f32 / 32.0 + horizontal as f32 / 255.0).clamp(0.0, 1.0);
+                    let _ = curve.set(handle, curve.eval(handle as f32 / 32.0)); // keep value
+                    let value = curve.get(handle).unwrap_or_default() + vertical as f32 * modifier;
+                    if let Some(index) = grid_index(x) {
+                        let _ = curve.set(index, value.clamp(0.0, 1.0));
+                    }
+                    self.editor.changed();
+                }
+                if ui.input(|input| input.key_pressed(egui::Key::Delete)) {
+                    let _ = curve.reset_point(handle);
+                    self.curve_handle = None;
+                    self.editor.changed();
+                }
+            }
+            if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+                self.curve_handle = None;
+            }
+        }
+        ui.add_space(6.0);
+        let levels = &mut layer.levels;
+        control(ui, "Black point", &mut levels.black, 0.0..=0.49, "");
+        control(ui, "Gamma", &mut levels.gamma, 0.2..=5.0, "");
+        control(ui, "White point", &mut levels.white, 0.51..=1.0, "");
+        ui.add_space(6.0);
+        // Histogram of the final composition, computed on the GPU.
+        ui.label(
+            RichText::new("HISTOGRAM · final pixels")
+                .size(10.0)
+                .color(MUTED),
+        );
+        ui.add_space(4.0);
+        if let Some(rows) = &self.histogram_rows {
+            let height = 52.0;
+            histogram_row(ui, &rows[0], Color32::from_rgb(228, 229, 234), height);
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                histogram_row(ui, &rows[1], Color32::from_rgb(224, 67, 67), 26.0);
+            });
+            ui.horizontal(|ui| {
+                histogram_row(ui, &rows[2], Color32::from_rgb(96, 200, 96), 26.0);
+                histogram_row(ui, &rows[3], Color32::from_rgb(88, 122, 236), 26.0);
+            });
+        } else {
+            ui.label(RichText::new("measuring…").size(11.0).color(MUTED));
+        }
+        ui.add_space(6.0);
+        // Before/after: hold to see unadjusted pixels. Render-time bypass;
+        // the document is untouched and no history entry is created.
+        let compare = ui
+            .add(
+                egui::Button::new(
+                    RichText::new(if self.compare {
+                        "⬉ After"
+                    } else {
+                        "⬉ Before"
+                    })
+                    .size(12.0),
+                )
+                .selected(self.compare),
+            )
+            .on_hover_text("Hold to compare against the unadjusted image");
+        if compare.clicked() {
+            self.compare = !self.compare;
+            self.gpu.set_compare(self.compare);
+        }
+        if layer != original {
+            self.editor.begin_edit();
+            self.editor.document.layers[selected] = layer;
+            self.editor.changed();
+        }
+    }
+
+    /// Draggable curve editor on the 33-point grid. Click/drag to bend the
+    /// curve, double-click a point to release it, click the canvas to grab
+    /// the nearest point. Handles are part of keyboard focus order.
+    fn curve_editor(&mut self, ui: &mut egui::Ui, curve: &mut Curve) -> egui::Response {
+        // A square-ish editor: inside a ScrollArea the available height is
+        // the visible viewport, so cap by width and keep it fully visible.
+        let height = ui.available_width().min(150.0).min(110.0);
+        let size = egui::vec2(ui.available_width(), height);
+        let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Other,
+                true,
+                format!(
+                    "Tone curve editor, {}",
+                    Channel::ALL[self.curve_channel].name()
+                ),
+            )
+        });
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 3.0, Color32::from_rgb(24, 26, 30));
+        // Diagonal identity reference.
+        painter.line_segment(
+            [rect.left_bottom(), rect.right_top()],
+            Stroke::new(1.0_f32, Color32::from_gray(70)),
+        );
+        // The curve itself.
+        let points: Vec<Pos2> = (0..=64)
+            .map(|step| {
+                let x = step as f32 / 64.0;
+                egui::pos2(
+                    rect.left() + rect.width() * x,
+                    rect.bottom() - rect.height() * curve.eval(x),
+                )
+            })
+            .collect();
+        painter.add(egui::Shape::line(points, Stroke::new(2.0_f32, ACCENT)));
+        // Control points: defined ones are solid, others small dots.
+        for index in 0..vibeshop::curves::CURVE_POINTS {
+            let x = index as f32 / (vibeshop::curves::CURVE_POINTS - 1) as f32;
+            let at = egui::pos2(
+                rect.left() + rect.width() * x,
+                rect.bottom() - rect.height() * curve.eval(x),
+            );
+            let defined = curve.get(index).is_some();
+            let active = self.curve_handle == Some(index);
+            let color = if active {
+                Color32::WHITE
+            } else if defined {
+                ACCENT
+            } else {
+                Color32::from_gray(90)
+            };
+            painter.circle_filled(at, if active || defined { 4.0 } else { 2.0 }, color);
+        }
+        // Pointer interaction: press grabs the nearest point on the curve.
+        if response.drag_started() {
+            eprintln!(
+                "[curve] START interact={:?} dragged={}",
+                response.interact_pointer_pos().map(|p| (p.x, p.y)),
+                response.dragged()
+            );
+        }
+        if response.drag_started()
+            && let Some(pointer) = response.interact_pointer_pos()
+        {
+            let tx = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+            let index = grid_index(tx).unwrap_or(0);
+            self.curve_handle = Some(index);
+        }
+        if response.dragged()
+            && let Some(pointer) = response.interact_pointer_pos()
+        {
+            let x = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+            let y = 1.0 - ((pointer.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
+            if let Some(index) = grid_index(x) {
+                let _ = curve.set(index, y);
+                self.curve_handle = Some(index);
+            }
+        }
+        if response.drag_stopped() {
+            self.curve_handle = self.curve_handle.take();
+        }
+        // Double-click releases a point back to the interpolated path.
+        if response.double_clicked()
+            && let Some(pointer) = response.interact_pointer_pos()
+        {
+            let tx = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+            if let Some(index) = grid_index(tx) {
+                let _ = curve.reset_point(index);
+                self.curve_handle = None;
+            }
+        }
+        if response.changed() {
+            self.editor.changed();
+        }
+        response
+    }
+}
+
+/// Nearest grid index for an x position on the curve editor.
+fn grid_index(x: f32) -> Option<usize> {
+    let index = (x * (vibeshop::curves::CURVE_POINTS - 1) as f32).round();
+    usize::try_from(index as isize)
+        .ok()
+        .filter(|i| *i < vibeshop::curves::CURVE_POINTS)
 }
 fn control(
     ui: &mut egui::Ui,

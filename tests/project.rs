@@ -78,7 +78,8 @@ fn malformed_headers_assets_and_layers_are_rejected() {
     let opacity = visibility + 2;
     let cases: Vec<(usize, Vec<u8>)> = vec![
         (0, vec![0]),
-        (8, 2_u32.to_le_bytes().to_vec()),
+        // Version 2 is the current format; 3 does not exist yet.
+        (8, 3_u32.to_le_bytes().to_vec()),
         (12, u32::MAX.to_le_bytes().to_vec()),
         (20, 17_u32.to_le_bytes().to_vec()),
         (24, 17_u32.to_le_bytes().to_vec()),
@@ -92,6 +93,13 @@ fn malformed_headers_assets_and_layers_are_rejected() {
         (opacity, f32::NAN.to_le_bytes().to_vec()),
         (opacity + 4, f32::INFINITY.to_le_bytes().to_vec()),
         (opacity + 16, 8193_i32.to_le_bytes().to_vec()),
+        // Levels: NaN black point must be rejected by document validation.
+        // Layout after offset: black at +24, gamma +28, white +32, then
+        // 4 curves x 33 f32 control values starting at +36.
+        (opacity + 24, f32::NAN.to_le_bytes().to_vec()),
+        (opacity + 32, f32::INFINITY.to_le_bytes().to_vec()),
+        // Curve control value outside 0..=1 (RGB curve, first point).
+        (opacity + 36, 1.5_f32.to_le_bytes().to_vec()),
     ];
     for (offset, replacement) in cases {
         let mut bad = bytes.clone();
