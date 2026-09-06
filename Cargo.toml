@@ -14,6 +14,7 @@ pollster = "0.4"
 rfd = "0.15"
 tempfile = "3"
 wgpu = "=27.0.1"
+accesskit = "0.21"
 
 [lints.rust]
 unsafe_code = "forbid"

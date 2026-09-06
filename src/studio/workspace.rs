@@ -1,5 +1,11 @@
-use super::{ACCENT, MUTED, PANEL, Studio, Tool, files::Action};
-use eframe::egui::{self, Color32, RichText, Vec2};
+use super::{
+    ACCENT, MUTED, PANEL, Studio, Tool,
+    files::Action,
+    icons,
+    icons::{TEXT, TEXT_MUTED},
+};
+use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
+use vibeshop::curves::{Channel, Curve};
 use vibeshop::document::{self, Blend};
 
 impl Studio {
@@ -21,7 +27,10 @@ impl Studio {
                             if ui
                                 .add_enabled(
                                     self.job.is_none(),
-                                    egui::Button::new("New canvas…").shortcut_text("Ctrl/Cmd+N"),
+                                    egui::Button::new(
+                                        RichText::new(format!("{} New canvas…", icons::NEW_CANVAS))
+                                            .color(TEXT),
+                                    ),
                                 )
                                 .clicked()
                             {
@@ -31,7 +40,8 @@ impl Studio {
                             if ui
                                 .add_enabled(
                                     self.job.is_none(),
-                                    egui::Button::new("Open…").shortcut_text("Ctrl/Cmd+O"),
+                                    egui::Button::new(format!("{} Open…", icons::OPEN))
+                                        .shortcut_text("Ctrl/Cmd+O"),
                                 )
                                 .clicked()
                             {
@@ -42,7 +52,8 @@ impl Studio {
                             if ui
                                 .add_enabled(
                                     self.job.is_none(),
-                                    egui::Button::new("Save project").shortcut_text("Ctrl/Cmd+S"),
+                                    egui::Button::new(format!("{} Save project", icons::SAVE))
+                                        .shortcut_text("Ctrl/Cmd+S"),
                                 )
                                 .clicked()
                             {
@@ -52,7 +63,7 @@ impl Studio {
                             if ui
                                 .add_enabled(
                                     self.job.is_none(),
-                                    egui::Button::new("Save project as…")
+                                    egui::Button::new(format!("{} Save project as…", icons::SAVE))
                                         .shortcut_text("Ctrl/Cmd+Shift+S"),
                                 )
                                 .clicked()
@@ -63,7 +74,7 @@ impl Studio {
                             if ui
                                 .add_enabled(
                                     self.job.is_none(),
-                                    egui::Button::new("Export PNG…")
+                                    egui::Button::new(format!("{} Export PNG…", icons::EXPORT))
                                         .shortcut_text("Ctrl/Cmd+Shift+E"),
                                 )
                                 .clicked()
@@ -84,14 +95,22 @@ impl Studio {
                         });
                         ui.separator();
                         if ui
-                            .add_enabled(self.job.is_none(), egui::Button::new("Open"))
+                            .add_enabled(
+                                self.job.is_none(),
+                                egui::Button::new(RichText::new(format!("{} Open", icons::OPEN)))
+                                    .min_size(egui::vec2(84.0, 28.0)),
+                            )
                             .on_hover_text("Open an image or editable project · Ctrl/Cmd+O")
                             .clicked()
                         {
                             self.request(Action::Open(None, false), ctx);
                         }
                         if ui
-                            .add_enabled(self.job.is_none(), egui::Button::new("Save"))
+                            .add_enabled(
+                                self.job.is_none(),
+                                egui::Button::new(RichText::new(format!("{} Save", icons::SAVE)))
+                                    .min_size(egui::vec2(84.0, 28.0)),
+                            )
                             .on_hover_text("Save editable layers as a .vibe project · Ctrl/Cmd+S")
                             .clicked()
                         {
@@ -99,14 +118,22 @@ impl Studio {
                         }
                         ui.add_space(8.0);
                         if ui
-                            .add_enabled(self.editor.can_undo(), egui::Button::new("Undo"))
+                            .add_enabled(
+                                self.editor.can_undo(),
+                                egui::Button::new(RichText::new(format!("{} Undo", icons::UNDO)))
+                                    .min_size(egui::vec2(84.0, 28.0)),
+                            )
                             .on_hover_text("Ctrl/Cmd+Z")
                             .clicked()
                         {
                             self.editor.undo();
                         }
                         if ui
-                            .add_enabled(self.editor.can_redo(), egui::Button::new("Redo"))
+                            .add_enabled(
+                                self.editor.can_redo(),
+                                egui::Button::new(RichText::new(format!("{} Redo", icons::REDO)))
+                                    .min_size(egui::vec2(84.0, 28.0)),
+                            )
                             .on_hover_text("Ctrl/Cmd+Shift+Z")
                             .clicked()
                         {
@@ -117,12 +144,12 @@ impl Studio {
                                 .add_enabled(
                                     self.job.is_none(),
                                     egui::Button::new(
-                                        RichText::new("Export PNG")
+                                        RichText::new(format!("{} Export PNG", icons::EXPORT))
                                             .strong()
                                             .color(Color32::from_rgb(24, 31, 19)),
                                     )
                                     .fill(ACCENT)
-                                    .min_size(egui::vec2(118.0, 32.0)),
+                                    .min_size(egui::vec2(140.0, 32.0)),
                                 )
                                 .on_hover_text("Export a flattened copy · Ctrl/Cmd+Shift+E")
                                 .clicked()
@@ -183,7 +210,7 @@ impl Studio {
         section(ui, "PROPERTIES");
         ui.add_space(8.0);
         let selected = self.editor.selected;
-        let Some(original) = self.editor.document.layers.get(selected) else {
+        let Some(original) = self.editor.document.layers.get(selected).cloned() else {
             ui.label(RichText::new("No layer selected").color(MUTED));
             ui.label("Add an image to start editing.");
             return;
@@ -200,15 +227,22 @@ impl Studio {
             .color(MUTED),
         );
         ui.add_space(12.0);
-        control(ui, "Exposure", &mut layer.exposure, -5.0..=5.0, " EV");
-        control(ui, "Contrast", &mut layer.contrast, 0.0..=2.0, "×");
-        control(ui, "Saturation", &mut layer.saturation, 0.0..=2.0, "×");
+        let exposure = ui.label(icons::glyph(icons::EXPOSURE, 15.0).color(TEXT_MUTED));
+        control(ui, "Exposure", &mut layer.exposure, -5.0..=5.0, " EV").labelled_by(exposure.id);
+        let contrast = ui.label(icons::glyph(icons::CONTRAST, 15.0).color(TEXT_MUTED));
+        control(ui, "Contrast", &mut layer.contrast, 0.0..=2.0, "×").labelled_by(contrast.id);
+        let saturation = ui.label(icons::glyph(icons::SATURATION, 15.0).color(TEXT_MUTED));
+        control(ui, "Saturation", &mut layer.saturation, 0.0..=2.0, "×").labelled_by(saturation.id);
+        ui.add_space(8.0);
+        self.tone_panel(ui);
+        ui.add_space(8.0);
         if ui.small_button("Reset color adjustments").clicked() {
             layer.reset_adjustments();
         }
         ui.add_space(10.0);
         ui.separator();
         ui.add_space(10.0);
+        let opacity = ui.label(icons::glyph(icons::OPACITY, 15.0).color(TEXT_MUTED));
         ui.horizontal(|ui| {
             let label = ui.label("Blend");
             egui::ComboBox::from_id_salt("blend")
@@ -223,7 +257,7 @@ impl Studio {
                 .labelled_by(label.id);
         });
         ui.add_space(6.0);
-        control(ui, "Opacity", &mut layer.opacity, 0.0..=1.0, "");
+        control(ui, "Opacity", &mut layer.opacity, 0.0..=1.0, "").labelled_by(opacity.id);
         ui.horizontal(|ui| {
             let x = ui.label("X");
             ui.add(
@@ -240,7 +274,7 @@ impl Studio {
             )
             .labelled_by(y.id);
         });
-        if &layer != original {
+        if layer != original {
             self.editor.begin_edit();
             self.editor.document.layers[selected] = layer;
             self.editor.changed();
@@ -286,8 +320,9 @@ impl Studio {
                     if ui
                         .add_enabled(
                             count > 0 && count < document::MAX_LAYERS,
-                            egui::Button::new("Duplicate"),
+                            egui::Button::new(format!("{} Duplicate", icons::DUPLICATE)),
                         )
+                        .on_hover_text("Duplicate the selected layer")
                         .clicked()
                     {
                         let mut layer = self.editor.document.layers[selected].clone();
@@ -297,7 +332,10 @@ impl Studio {
                         }
                     }
                     if ui
-                        .add_enabled(count > 0, egui::Button::new("Remove"))
+                        .add_enabled(
+                            count > 0,
+                            egui::Button::new(format!("{} Remove", icons::REMOVE)),
+                        )
                         .on_hover_text("Remove selected layer · Undo restores it")
                         .clicked()
                     {
@@ -312,8 +350,9 @@ impl Studio {
                     if ui
                         .add_enabled(
                             count > 0 && selected + 1 < count,
-                            egui::Button::new("Raise layer"),
+                            egui::Button::new(format!("{} Raise layer", icons::RAISE)),
                         )
+                        .on_hover_text("Move the selected layer up in the stack")
                         .clicked()
                     {
                         self.editor.edit(|document, selected| {
@@ -322,7 +361,11 @@ impl Studio {
                         });
                     }
                     if ui
-                        .add_enabled(count > 0 && selected > 0, egui::Button::new("Lower layer"))
+                        .add_enabled(
+                            count > 0 && selected > 0,
+                            egui::Button::new(format!("{} Lower layer", icons::LOWER)),
+                        )
+                        .on_hover_text("Move the selected layer down in the stack")
                         .clicked()
                     {
                         self.editor.edit(|document, selected| {
@@ -365,7 +408,14 @@ impl Studio {
                                         egui::WidgetType::Checkbox,
                                         true,
                                         visible,
-                                        format!("Visible: {name}"),
+                                        format!(
+                                            "{} Visible: {name}",
+                                            if visible {
+                                                icons::VISIBLE
+                                            } else {
+                                                icons::HIDDEN
+                                            }
+                                        ),
                                     )
                                 });
                                 if visibility.changed() {
@@ -410,22 +460,47 @@ impl Studio {
             .show(ctx, |ui| {
                 ui.add_space(6.0);
                 ui.add_enabled_ui(!blocked, |ui| {
-                    for (tool, label, hint) in [
-                        (Tool::Move, "Move", "Move selected layer · V"),
-                        (Tool::Hand, "Pan", "Pan canvas · H or hold Space"),
+                    for (tool, icon, label, hint) in [
+                        (
+                            Tool::Move,
+                            icons::TOOL_MOVE,
+                            "Move",
+                            "Move selected layer · V",
+                        ),
+                        (
+                            Tool::Hand,
+                            icons::TOOL_PAN,
+                            "Pan",
+                            "Pan canvas · H or hold Space",
+                        ),
                     ] {
-                        if ui
+                        let response = ui
                             .add_sized(
                                 [52.0, 36.0],
-                                egui::Button::new(label).selected(self.tool == tool),
+                                egui::Button::new(
+                                    RichText::new(icon.to_string())
+                                        .size(21.0)
+                                        .color(if self.tool == tool { ACCENT } else { TEXT }),
+                                )
+                                .selected(self.tool == tool),
                             )
-                            .on_hover_text(hint)
-                            .clicked()
-                        {
+                            .on_hover_text(hint);
+                        response.widget_info(|| {
+                            egui::WidgetInfo::selected(
+                                egui::WidgetType::Button,
+                                true,
+                                self.tool == tool,
+                                label,
+                            )
+                        });
+                        if response.clicked() {
                             self.editor.finish_edit();
                             self.move_start = None;
                             self.tool = tool;
                         }
+                        ui.vertical_centered(|ui| {
+                            ui.label(RichText::new(label).size(10.0).color(MUTED));
+                        });
                         ui.add_space(6.0);
                     }
                 });
@@ -452,7 +527,7 @@ impl Studio {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_enabled_ui(!blocked, |ui| {
                             if ui
-                                .small_button("Fit")
+                                .small_button(format!("{} Fit", icons::FIT))
                                 .on_hover_text("Fit canvas · F")
                                 .clicked()
                             {
@@ -493,14 +568,284 @@ impl Studio {
 fn section(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(text).size(10.0).strong().color(MUTED));
 }
+
+/// Master levels, per-channel curves with a draggable editor, the GPU
+/// histogram of the final composition, and a before/after compare toggle.
+impl Studio {
+    fn tone_panel(&mut self, ui: &mut egui::Ui) {
+        section(ui, "CURVES");
+        ui.add_space(6.0);
+        // Channel picker as a selectable row of named tabs.
+        ui.horizontal(|ui| {
+            for (index, channel) in Channel::ALL.iter().enumerate() {
+                let selected = self.curve_channel == index;
+                if ui
+                    .add(
+                        egui::Button::new(RichText::new(channel.name()).size(11.0))
+                            .selected(selected)
+                            .min_size(egui::vec2(0.0, 22.0)),
+                    )
+                    .clicked()
+                {
+                    self.curve_channel = index;
+                    self.curve_handle = None;
+                }
+            }
+        });
+        ui.add_space(4.0);
+        let selected = self.editor.selected;
+        let Some(original) = self.editor.document.layers.get(selected).cloned() else {
+            return;
+        };
+        let mut layer = original.clone();
+        let curve = &mut layer.curves[self.curve_channel];
+        // The editor mutates the layer copy; commit happens below.
+        let response = self.curve_editor(ui, curve);
+        // Keyboard editing of the active handle: arrows move in 1/255 steps,
+        // Shift = 10x, Delete removes the point, Escape drops the handle.
+        if let Some(handle) = self.curve_handle {
+            if response.has_focus() {
+                let step = ui.input(|input| {
+                    let modifier = if input.modifiers.shift {
+                        10.0 / 255.0
+                    } else {
+                        1.0 / 255.0
+                    };
+                    let vertical = input.key_pressed(egui::Key::ArrowUp) as i8
+                        - input.key_pressed(egui::Key::ArrowDown) as i8;
+                    let horizontal = input.key_pressed(egui::Key::ArrowRight) as i8
+                        - input.key_pressed(egui::Key::ArrowLeft) as i8;
+                    (vertical, horizontal, modifier)
+                });
+                let (vertical, horizontal, modifier) = step;
+                if vertical != 0 || horizontal != 0 {
+                    let x = (handle as f32 / 32.0 + horizontal as f32 / 255.0).clamp(0.0, 1.0);
+                    let _ = curve.set(handle, curve.eval(handle as f32 / 32.0)); // keep value
+                    let value = curve.get(handle).unwrap_or_default() + vertical as f32 * modifier;
+                    if let Some(index) = grid_index(x) {
+                        let _ = curve.set(index, value.clamp(0.0, 1.0));
+                    }
+                    self.editor.changed();
+                }
+                if ui.input(|input| input.key_pressed(egui::Key::Delete)) {
+                    let _ = curve.reset_point(handle);
+                    self.curve_handle = None;
+                    self.editor.changed();
+                }
+            }
+            if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+                self.curve_handle = None;
+            }
+        }
+        ui.add_space(6.0);
+        let levels = &mut layer.levels;
+        control(ui, "Black point", &mut levels.black, 0.0..=0.49, "");
+        control(ui, "Gamma", &mut levels.gamma, 0.2..=5.0, "");
+        control(ui, "White point", &mut levels.white, 0.51..=1.0, "");
+        ui.add_space(6.0);
+        // Histogram of the final composition, computed on the GPU. The area
+        // is reserved at full height whether or not data has arrived, so the
+        // first readback never shifts the layout (a scrollbar appearing here
+        // would resize the canvas mid-session).
+        ui.label(
+            RichText::new("HISTOGRAM · final pixels")
+                .size(10.0)
+                .color(MUTED),
+        );
+        ui.add_space(4.0);
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 110.0), Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 2.0, Color32::from_black_alpha(60));
+        if let Some(rows) = &self.histogram_rows {
+            let peak = rows[0].iter().copied().max().unwrap_or(1).max(1) as f32;
+            let luma = Rect::from_min_max(rect.min, egui::pos2(rect.right(), rect.top() + 56.0));
+            let bar = luma.width() / 256.0;
+            for (bin, count) in rows[0].iter().enumerate() {
+                let h = luma.height() * (*count as f32 / peak).clamp(0.004, 1.0);
+                painter.rect_filled(
+                    Rect::from_min_size(
+                        egui::pos2(luma.left() + bin as f32 * bar, luma.bottom() - h),
+                        egui::vec2(bar.max(1.0), h),
+                    ),
+                    0.0,
+                    Color32::from_rgb(228, 229, 234).gamma_multiply(0.85),
+                );
+            }
+            for (row, color) in [
+                (1, Color32::from_rgb(224, 67, 67)),
+                (2, Color32::from_rgb(96, 200, 96)),
+                (3, Color32::from_rgb(88, 122, 236)),
+            ] {
+                let peak = rows[row].iter().copied().max().unwrap_or(1).max(1) as f32;
+                let band = Rect::from_min_max(
+                    egui::pos2(rect.left(), luma.bottom() + (row - 1) as f32 * 27.0),
+                    egui::pos2(rect.right(), luma.bottom() + (row - 1) as f32 * 27.0 + 26.0),
+                );
+                let bar = band.width() / 256.0;
+                for (bin, count) in rows[row].iter().enumerate() {
+                    let h = band.height() * (*count as f32 / peak).clamp(0.004, 1.0);
+                    painter.rect_filled(
+                        Rect::from_min_size(
+                            egui::pos2(band.left() + bin as f32 * bar, band.bottom() - h),
+                            egui::vec2(bar.max(1.0), h),
+                        ),
+                        0.0,
+                        color.gamma_multiply(0.85),
+                    );
+                }
+            }
+        } else {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "measuring…",
+                egui::FontId::proportional(11.0),
+                MUTED,
+            );
+        }
+        ui.add_space(6.0);
+        // Before/after: hold to see unadjusted pixels. Render-time bypass;
+        // the document is untouched and no history entry is created.
+        let compare = ui
+            .add(
+                egui::Button::new(
+                    RichText::new(if self.compare {
+                        "⬉ After"
+                    } else {
+                        "⬉ Before"
+                    })
+                    .size(12.0),
+                )
+                .selected(self.compare),
+            )
+            .on_hover_text("Hold to compare against the unadjusted image");
+        if compare.clicked() {
+            self.compare = !self.compare;
+            self.gpu.set_compare(self.compare);
+        }
+        if layer != original {
+            self.editor.begin_edit();
+            self.editor.document.layers[selected] = layer;
+            self.editor.changed();
+        }
+    }
+
+    /// Draggable curve editor on the 33-point grid. Click/drag to bend the
+    /// curve, double-click a point to release it, click the canvas to grab
+    /// the nearest point. Handles are part of keyboard focus order.
+    fn curve_editor(&mut self, ui: &mut egui::Ui, curve: &mut Curve) -> egui::Response {
+        // A square-ish editor: inside a ScrollArea the available height is
+        // the visible viewport, so cap by width and keep it fully visible.
+        let height = ui.available_width().min(150.0).min(110.0);
+        let size = egui::vec2(ui.available_width(), height);
+        let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Other,
+                true,
+                format!(
+                    "Tone curve editor, {}",
+                    Channel::ALL[self.curve_channel].name()
+                ),
+            )
+        });
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 3.0, Color32::from_rgb(24, 26, 30));
+        // Diagonal identity reference.
+        painter.line_segment(
+            [rect.left_bottom(), rect.right_top()],
+            Stroke::new(1.0_f32, Color32::from_gray(70)),
+        );
+        // The curve itself.
+        let points: Vec<Pos2> = (0..=64)
+            .map(|step| {
+                let x = step as f32 / 64.0;
+                egui::pos2(
+                    rect.left() + rect.width() * x,
+                    rect.bottom() - rect.height() * curve.eval(x),
+                )
+            })
+            .collect();
+        painter.add(egui::Shape::line(points, Stroke::new(2.0_f32, ACCENT)));
+        // Control points: defined ones are solid, others small dots.
+        for index in 0..vibeshop::curves::CURVE_POINTS {
+            let x = index as f32 / (vibeshop::curves::CURVE_POINTS - 1) as f32;
+            let at = egui::pos2(
+                rect.left() + rect.width() * x,
+                rect.bottom() - rect.height() * curve.eval(x),
+            );
+            let defined = curve.get(index).is_some();
+            let active = self.curve_handle == Some(index);
+            let color = if active {
+                Color32::WHITE
+            } else if defined {
+                ACCENT
+            } else {
+                Color32::from_gray(90)
+            };
+            painter.circle_filled(at, if active || defined { 4.0 } else { 2.0 }, color);
+        }
+        // Pointer interaction: press grabs the nearest point on the curve.
+        if response.drag_started() {
+            eprintln!(
+                "[curve] START interact={:?} dragged={}",
+                response.interact_pointer_pos().map(|p| (p.x, p.y)),
+                response.dragged()
+            );
+        }
+        if response.drag_started()
+            && let Some(pointer) = response.interact_pointer_pos()
+        {
+            let tx = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+            let index = grid_index(tx).unwrap_or(0);
+            self.curve_handle = Some(index);
+        }
+        if response.dragged()
+            && let Some(pointer) = response.interact_pointer_pos()
+        {
+            let x = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+            let y = 1.0 - ((pointer.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
+            if let Some(index) = grid_index(x) {
+                let _ = curve.set(index, y);
+                self.curve_handle = Some(index);
+            }
+        }
+        if response.drag_stopped() {
+            self.curve_handle = self.curve_handle.take();
+        }
+        // Double-click releases a point back to the interpolated path.
+        if response.double_clicked()
+            && let Some(pointer) = response.interact_pointer_pos()
+        {
+            let tx = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+            if let Some(index) = grid_index(tx) {
+                let _ = curve.reset_point(index);
+                self.curve_handle = None;
+            }
+        }
+        if response.changed() {
+            self.editor.changed();
+        }
+        response
+    }
+}
+
+/// Nearest grid index for an x position on the curve editor.
+fn grid_index(x: f32) -> Option<usize> {
+    let index = (x * (vibeshop::curves::CURVE_POINTS - 1) as f32).round();
+    usize::try_from(index as isize)
+        .ok()
+        .filter(|i| *i < vibeshop::curves::CURVE_POINTS)
+}
 fn control(
     ui: &mut egui::Ui,
     text: &str,
     value: &mut f32,
     range: std::ops::RangeInclusive<f32>,
     suffix: &str,
-) {
-    ui.scope(|ui| {
+) -> egui::Response {
+    let response = ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = 4.0;
         ui.spacing_mut().interact_size.y = 20.0;
         let mut label = egui::Id::NULL;
@@ -519,7 +864,8 @@ fn control(
         });
         ui.spacing_mut().slider_width = ui.available_width();
         ui.add(egui::Slider::new(value, range).show_value(false))
-            .labelled_by(label);
+            .labelled_by(label)
     });
     ui.add_space(6.0);
+    response.inner
 }
