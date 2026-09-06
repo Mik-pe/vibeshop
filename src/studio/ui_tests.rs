@@ -1,4 +1,5 @@
-use super::{Studio, Tool, files::Action};
+use super::{Studio, Tool, files::Action, icons};
+use accesskit::{Action as AccessKitAction, ActionRequest};
 use eframe::egui::{self, Event, Modifiers, PointerButton, Pos2, Rect};
 use std::{
     collections::HashMap,
@@ -17,7 +18,9 @@ struct Harness {
     logical_size: [u32; 2],
     scale: f32,
     time: f64,
-    controls: HashMap<String, Rect>,
+    controls: HashMap<String, (egui::accesskit::NodeId, Rect)>,
+    /// The accesskit node egui reports as holding keyboard focus.
+    focused_accesskit: Option<egui::accesskit::NodeId>,
     target: wgpu::Texture,
 }
 impl Harness {
@@ -66,6 +69,7 @@ impl Harness {
             scale,
             time: 0.0,
             controls: HashMap::new(),
+            focused_accesskit: None,
             target,
         };
         h.frame(Vec::new());
@@ -91,14 +95,19 @@ impl Harness {
             .native_pixels_per_point = Some(self.scale);
         let output = self.ctx.run(input, |ctx| self.app.show(ctx));
         self.controls.clear();
+        self.focused_accesskit = None;
         if let Some(update) = output.platform_output.accesskit_update {
-            for (_, node) in &update.nodes {
+            self.focused_accesskit = Some(update.focus);
+            for (id, node) in &update.nodes {
                 if let (Some(label), Some(bounds)) = (node.label(), node.bounds()) {
                     self.controls.insert(
                         label.to_owned(),
-                        Rect::from_min_max(
-                            egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
-                            egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+                        (
+                            *id,
+                            Rect::from_min_max(
+                                egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+                                egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+                            ),
                         ),
                     );
                 }
@@ -151,12 +160,45 @@ impl Harness {
         }
     }
     fn rect(&self, name: &str) -> Rect {
-        *self.controls.get(name).unwrap_or_else(|| {
-            panic!(
-                "Missing accessible control {name}; present: {:?}",
-                self.controls.keys().collect::<Vec<_>>()
-            )
-        })
+        self.controls
+            .get(name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "Missing accessible control {name}; present: {:?}",
+                    self.controls.keys().collect::<Vec<_>>()
+                )
+            })
+            .1
+    }
+    /// Focus a control exactly the way assistive technology does: an
+    /// accesskit Focus action request, the same path screen readers use.
+    fn focus(&mut self, name: &str) {
+        let id = self
+            .controls
+            .get(name)
+            .map(|(id, _)| *id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "Cannot focus missing control {name}; present: {:?}",
+                    self.controls.keys().collect::<Vec<_>>()
+                )
+            });
+        self.frame(vec![Event::AccessKitActionRequest(ActionRequest {
+            action: AccessKitAction::Focus,
+            target: id,
+            data: None,
+        })]);
+    }
+    /// Is this named control the one egui reports as holding keyboard focus?
+    fn is_focused(&self, name: &str) -> bool {
+        match (self.controls.get(name), self.focused_accesskit) {
+            (Some((id, _)), Some(focused)) => *id == focused,
+            _ => false,
+        }
+    }
+    /// Press a key on the currently focused widget.
+    fn press(&mut self, key: egui::Key) {
+        self.key(key, Modifiers::NONE);
     }
     fn click(&mut self, name: &str) {
         let at = self.rect(name).center();
@@ -192,6 +234,13 @@ impl Harness {
             pressed: false,
             repeat: false,
             modifiers,
+        }]);
+        self.frame(vec![Event::Key {
+            key: egui::Key::F,
+            physical_key: Some(egui::Key::F),
+            pressed: false,
+            repeat: false,
+            modifiers: Modifiers::NONE,
         }]);
     }
     fn drag(&mut self, start: Pos2, end: Pos2) {
@@ -297,21 +346,21 @@ fn workspace_controls_stay_visible_at_minimum_size_and_multiple_dpi() {
         let mut h = Harness::new(size, scale);
         let bounds = Rect::from_min_size(Pos2::ZERO, egui::vec2(size[0] as f32, size[1] as f32));
         for control in [
-            "Open",
-            "Save",
-            "Export PNG",
-            "+ Image",
-            "Duplicate",
-            "Remove",
-            "Raise layer",
-            "Lower layer",
-            "Move",
-            "Pan",
+            format!("{} Open", icons::OPEN),
+            format!("{} Save", icons::SAVE),
+            format!("{} Export PNG", icons::EXPORT),
+            "+ Image".to_owned(),
+            format!("{} Duplicate", icons::DUPLICATE),
+            format!("{} Remove", icons::REMOVE),
+            format!("{} Raise layer", icons::RAISE),
+            format!("{} Lower layer", icons::LOWER),
+            "Move".to_owned(),
+            "Pan".to_owned(),
         ] {
             assert!(
-                bounds.contains_rect(h.rect(control)),
+                bounds.contains_rect(h.rect(&control)),
                 "{control} is outside {size:?} at scale {scale}: {:?}",
-                h.rect(control)
+                h.rect(&control)
             );
         }
         h.capture(name);
@@ -324,8 +373,12 @@ fn workspace_controls_stay_visible_at_minimum_size_and_multiple_dpi() {
         }
         h.frame(Vec::new());
         h.frame(Vec::new());
-        for control in ["Remove", "Raise layer", "Lower layer"] {
-            assert!(bounds.contains_rect(h.rect(control)));
+        for control in [
+            format!("{} Remove", icons::REMOVE),
+            format!("{} Raise layer", icons::RAISE),
+            format!("{} Lower layer", icons::LOWER),
+        ] {
+            assert!(bounds.contains_rect(h.rect(&control)));
         }
         if scale == 1.0 {
             h.capture(&format!("{name}-many-layers"));
@@ -339,14 +392,14 @@ fn workspace_controls_stay_visible_at_minimum_size_and_multiple_dpi() {
 #[test]
 fn workspace_buttons_edit_layers_and_navigation_reuses_gpu_pixels() {
     let mut h = Harness::new([1000, 640], 1.0);
-    h.click("Duplicate");
+    h.click(&format!("{} Duplicate", icons::DUPLICATE));
     assert_eq!(h.app.editor.document.layers.len(), 2);
     assert_eq!(h.app.editor.selected, 1);
-    h.click("Lower layer");
+    h.click(&format!("{} Lower layer", icons::LOWER));
     assert_eq!(h.app.editor.selected, 0);
-    h.click("Raise layer");
+    h.click(&format!("{} Raise layer", icons::RAISE));
     assert_eq!(h.app.editor.selected, 1);
-    h.click("Remove");
+    h.click(&format!("{} Remove", icons::REMOVE));
     assert_eq!(h.app.editor.document.layers.len(), 1);
     h.key(egui::Key::Z, Modifiers::COMMAND);
     assert_eq!(h.app.editor.document.layers.len(), 2);
@@ -394,13 +447,13 @@ fn modal_cancel_discard_and_save_continue_are_real_ui_actions() {
     assert!(h.app.new_size.is_some());
     h.key(egui::Key::Escape, Modifiers::NONE);
     assert!(h.app.new_size.is_none());
-    h.click("Duplicate");
+    h.click(&format!("{} Duplicate", icons::DUPLICATE));
     let before = h.app.editor.document.clone();
     h.key(egui::Key::N, Modifiers::COMMAND);
     h.click("Create canvas");
     assert!(h.app.pending.is_some());
     h.capture("workspace-save-dialog");
-    h.click("Duplicate");
+    h.click(&format!("{} Duplicate", icons::DUPLICATE));
     h.key(egui::Key::Z, Modifiers::COMMAND);
     assert_eq!(h.app.editor.document, before);
     assert!(h.app.pending.is_some());
@@ -423,4 +476,100 @@ fn modal_cancel_discard_and_save_continue_are_real_ui_actions() {
     h.frame(Vec::new());
     h.click("Discard changes");
     assert_eq!(h.app.editor.document.width, 800);
+}
+
+#[test]
+fn icons_only_buttons_carry_meaningful_accessibility_names() {
+    // The icon vocabulary must render from the bundled fonts before anything
+    // else; a missing glyph is a regression, not a cosmetic issue.
+    let h = Harness::new([1000, 640], 1.0);
+    // The first-frame assertion lives inside show(); reaching this point
+    // proves every icon glyph exists in the bundled fonts.
+    for name in [
+        "Move".to_owned(),
+        "Pan".to_owned(),
+        format!("{} Fit", icons::FIT),
+    ] {
+        h.rect(&name);
+    }
+    h.capture("workspace-icons");
+}
+
+#[test]
+fn keyboard_focus_and_activation_work_like_assistive_technology() {
+    let mut h = Harness::new([1000, 640], 1.0);
+    let window = Rect::from_min_size(Pos2::ZERO, egui::vec2(1000.0, 640.0));
+    // Assistive technology focuses controls through the accessibility tree;
+    // those requests must drive this editor, and focused controls must then
+    // respond to the keyboard without any pointer interaction.
+    let fit = format!("{} Fit", icons::FIT);
+    let layer = "Dune study · generated demo";
+    let eye = format!("{} Visible: {layer}", icons::VISIBLE);
+    for target in [
+        format!("{} Duplicate", icons::DUPLICATE),
+        fit.clone(),
+        eye.clone(),
+    ] {
+        h.focus(&target);
+        h.frame(Vec::new());
+        assert!(
+            h.is_focused(&target),
+            "accesskit Focus on {target} did not move keyboard focus"
+        );
+        let rect = h.rect(&target);
+        assert!(
+            window.contains_rect(rect),
+            "focused {target} is outside the viewport: {rect:?}"
+        );
+    }
+    // Space activates the focused visibility toggle.
+    h.focus(&eye);
+    h.frame(Vec::new());
+    h.press(egui::Key::Space);
+    h.frame(Vec::new());
+    assert!(
+        !h.app.editor.document.layers[0].visible,
+        "Space on the focused visibility checkbox must hide the layer"
+    );
+    // Enter activates a focused button command.
+    h.focus(&fit);
+    h.frame(Vec::new());
+    h.press(egui::Key::Enter);
+    h.frame(Vec::new());
+    assert!(
+        h.app.fit,
+        "Enter on the focused Fit button must fit the canvas"
+    );
+}
+
+#[test]
+fn modal_dialogs_block_shortcuts_from_behind() {
+    let mut h = Harness::new([1000, 640], 1.0);
+    h.click(&format!("{} Duplicate", icons::DUPLICATE));
+    assert_eq!(h.app.editor.document.layers.len(), 2);
+    let before = h.app.editor.document.clone();
+    h.key(egui::Key::N, Modifiers::COMMAND);
+    h.frame(Vec::new());
+    assert!(h.app.new_size.is_some());
+    h.click("Create canvas");
+    assert!(h.app.pending.is_some());
+    let blocked_before = h.app.editor.document.clone();
+    h.key(egui::Key::Z, Modifiers::COMMAND);
+    h.key(egui::Key::O, Modifiers::COMMAND);
+    h.frame(Vec::new());
+    assert!(h.app.job.is_none(), "no file job may start behind a modal");
+    assert!(
+        h.app.editor.document == blocked_before,
+        "document must not change while the unsaved-work modal is up"
+    );
+    h.key(egui::Key::Escape, Modifiers::NONE);
+    h.frame(Vec::new());
+    assert!(h.app.pending.is_none());
+    h.frame(Vec::new());
+    h.key(egui::Key::Z, Modifiers::COMMAND);
+    assert_ne!(
+        h.app.editor.document, before,
+        "after dismissal, undo must work again"
+    );
+    assert_eq!(h.app.editor.document.layers.len(), 1);
 }

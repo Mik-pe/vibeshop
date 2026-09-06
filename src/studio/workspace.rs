@@ -1,4 +1,9 @@
-use super::{ACCENT, MUTED, PANEL, Studio, Tool, files::Action};
+use super::{
+    ACCENT, MUTED, PANEL, Studio, Tool,
+    files::Action,
+    icons,
+    icons::{TEXT, TEXT_MUTED},
+};
 use eframe::egui::{self, Color32, RichText, Vec2};
 use vibeshop::document::{self, Blend};
 
@@ -21,7 +26,10 @@ impl Studio {
                             if ui
                                 .add_enabled(
                                     self.job.is_none(),
-                                    egui::Button::new("New canvas…").shortcut_text("Ctrl/Cmd+N"),
+                                    egui::Button::new(
+                                        RichText::new(format!("{} New canvas…", icons::NEW_CANVAS))
+                                            .color(TEXT),
+                                    ),
                                 )
                                 .clicked()
                             {
@@ -31,7 +39,8 @@ impl Studio {
                             if ui
                                 .add_enabled(
                                     self.job.is_none(),
-                                    egui::Button::new("Open…").shortcut_text("Ctrl/Cmd+O"),
+                                    egui::Button::new(format!("{} Open…", icons::OPEN))
+                                        .shortcut_text("Ctrl/Cmd+O"),
                                 )
                                 .clicked()
                             {
@@ -42,7 +51,8 @@ impl Studio {
                             if ui
                                 .add_enabled(
                                     self.job.is_none(),
-                                    egui::Button::new("Save project").shortcut_text("Ctrl/Cmd+S"),
+                                    egui::Button::new(format!("{} Save project", icons::SAVE))
+                                        .shortcut_text("Ctrl/Cmd+S"),
                                 )
                                 .clicked()
                             {
@@ -52,7 +62,7 @@ impl Studio {
                             if ui
                                 .add_enabled(
                                     self.job.is_none(),
-                                    egui::Button::new("Save project as…")
+                                    egui::Button::new(format!("{} Save project as…", icons::SAVE))
                                         .shortcut_text("Ctrl/Cmd+Shift+S"),
                                 )
                                 .clicked()
@@ -63,7 +73,7 @@ impl Studio {
                             if ui
                                 .add_enabled(
                                     self.job.is_none(),
-                                    egui::Button::new("Export PNG…")
+                                    egui::Button::new(format!("{} Export PNG…", icons::EXPORT))
                                         .shortcut_text("Ctrl/Cmd+Shift+E"),
                                 )
                                 .clicked()
@@ -84,14 +94,22 @@ impl Studio {
                         });
                         ui.separator();
                         if ui
-                            .add_enabled(self.job.is_none(), egui::Button::new("Open"))
+                            .add_enabled(
+                                self.job.is_none(),
+                                egui::Button::new(RichText::new(format!("{} Open", icons::OPEN)))
+                                    .min_size(egui::vec2(84.0, 28.0)),
+                            )
                             .on_hover_text("Open an image or editable project · Ctrl/Cmd+O")
                             .clicked()
                         {
                             self.request(Action::Open(None, false), ctx);
                         }
                         if ui
-                            .add_enabled(self.job.is_none(), egui::Button::new("Save"))
+                            .add_enabled(
+                                self.job.is_none(),
+                                egui::Button::new(RichText::new(format!("{} Save", icons::SAVE)))
+                                    .min_size(egui::vec2(84.0, 28.0)),
+                            )
                             .on_hover_text("Save editable layers as a .vibe project · Ctrl/Cmd+S")
                             .clicked()
                         {
@@ -99,14 +117,22 @@ impl Studio {
                         }
                         ui.add_space(8.0);
                         if ui
-                            .add_enabled(self.editor.can_undo(), egui::Button::new("Undo"))
+                            .add_enabled(
+                                self.editor.can_undo(),
+                                egui::Button::new(RichText::new(format!("{} Undo", icons::UNDO)))
+                                    .min_size(egui::vec2(84.0, 28.0)),
+                            )
                             .on_hover_text("Ctrl/Cmd+Z")
                             .clicked()
                         {
                             self.editor.undo();
                         }
                         if ui
-                            .add_enabled(self.editor.can_redo(), egui::Button::new("Redo"))
+                            .add_enabled(
+                                self.editor.can_redo(),
+                                egui::Button::new(RichText::new(format!("{} Redo", icons::REDO)))
+                                    .min_size(egui::vec2(84.0, 28.0)),
+                            )
                             .on_hover_text("Ctrl/Cmd+Shift+Z")
                             .clicked()
                         {
@@ -117,12 +143,12 @@ impl Studio {
                                 .add_enabled(
                                     self.job.is_none(),
                                     egui::Button::new(
-                                        RichText::new("Export PNG")
+                                        RichText::new(format!("{} Export PNG", icons::EXPORT))
                                             .strong()
                                             .color(Color32::from_rgb(24, 31, 19)),
                                     )
                                     .fill(ACCENT)
-                                    .min_size(egui::vec2(118.0, 32.0)),
+                                    .min_size(egui::vec2(140.0, 32.0)),
                                 )
                                 .on_hover_text("Export a flattened copy · Ctrl/Cmd+Shift+E")
                                 .clicked()
@@ -200,15 +226,19 @@ impl Studio {
             .color(MUTED),
         );
         ui.add_space(12.0);
-        control(ui, "Exposure", &mut layer.exposure, -5.0..=5.0, " EV");
-        control(ui, "Contrast", &mut layer.contrast, 0.0..=2.0, "×");
-        control(ui, "Saturation", &mut layer.saturation, 0.0..=2.0, "×");
+        let exposure = ui.label(icons::glyph(icons::EXPOSURE, 15.0).color(TEXT_MUTED));
+        control(ui, "Exposure", &mut layer.exposure, -5.0..=5.0, " EV").labelled_by(exposure.id);
+        let contrast = ui.label(icons::glyph(icons::CONTRAST, 15.0).color(TEXT_MUTED));
+        control(ui, "Contrast", &mut layer.contrast, 0.0..=2.0, "×").labelled_by(contrast.id);
+        let saturation = ui.label(icons::glyph(icons::SATURATION, 15.0).color(TEXT_MUTED));
+        control(ui, "Saturation", &mut layer.saturation, 0.0..=2.0, "×").labelled_by(saturation.id);
         if ui.small_button("Reset color adjustments").clicked() {
             layer.reset_adjustments();
         }
         ui.add_space(10.0);
         ui.separator();
         ui.add_space(10.0);
+        let opacity = ui.label(icons::glyph(icons::OPACITY, 15.0).color(TEXT_MUTED));
         ui.horizontal(|ui| {
             let label = ui.label("Blend");
             egui::ComboBox::from_id_salt("blend")
@@ -223,7 +253,7 @@ impl Studio {
                 .labelled_by(label.id);
         });
         ui.add_space(6.0);
-        control(ui, "Opacity", &mut layer.opacity, 0.0..=1.0, "");
+        control(ui, "Opacity", &mut layer.opacity, 0.0..=1.0, "").labelled_by(opacity.id);
         ui.horizontal(|ui| {
             let x = ui.label("X");
             ui.add(
@@ -286,8 +316,9 @@ impl Studio {
                     if ui
                         .add_enabled(
                             count > 0 && count < document::MAX_LAYERS,
-                            egui::Button::new("Duplicate"),
+                            egui::Button::new(format!("{} Duplicate", icons::DUPLICATE)),
                         )
+                        .on_hover_text("Duplicate the selected layer")
                         .clicked()
                     {
                         let mut layer = self.editor.document.layers[selected].clone();
@@ -297,7 +328,10 @@ impl Studio {
                         }
                     }
                     if ui
-                        .add_enabled(count > 0, egui::Button::new("Remove"))
+                        .add_enabled(
+                            count > 0,
+                            egui::Button::new(format!("{} Remove", icons::REMOVE)),
+                        )
                         .on_hover_text("Remove selected layer · Undo restores it")
                         .clicked()
                     {
@@ -312,8 +346,9 @@ impl Studio {
                     if ui
                         .add_enabled(
                             count > 0 && selected + 1 < count,
-                            egui::Button::new("Raise layer"),
+                            egui::Button::new(format!("{} Raise layer", icons::RAISE)),
                         )
+                        .on_hover_text("Move the selected layer up in the stack")
                         .clicked()
                     {
                         self.editor.edit(|document, selected| {
@@ -322,7 +357,11 @@ impl Studio {
                         });
                     }
                     if ui
-                        .add_enabled(count > 0 && selected > 0, egui::Button::new("Lower layer"))
+                        .add_enabled(
+                            count > 0 && selected > 0,
+                            egui::Button::new(format!("{} Lower layer", icons::LOWER)),
+                        )
+                        .on_hover_text("Move the selected layer down in the stack")
                         .clicked()
                     {
                         self.editor.edit(|document, selected| {
@@ -365,7 +404,14 @@ impl Studio {
                                         egui::WidgetType::Checkbox,
                                         true,
                                         visible,
-                                        format!("Visible: {name}"),
+                                        format!(
+                                            "{} Visible: {name}",
+                                            if visible {
+                                                icons::VISIBLE
+                                            } else {
+                                                icons::HIDDEN
+                                            }
+                                        ),
                                     )
                                 });
                                 if visibility.changed() {
@@ -410,22 +456,47 @@ impl Studio {
             .show(ctx, |ui| {
                 ui.add_space(6.0);
                 ui.add_enabled_ui(!blocked, |ui| {
-                    for (tool, label, hint) in [
-                        (Tool::Move, "Move", "Move selected layer · V"),
-                        (Tool::Hand, "Pan", "Pan canvas · H or hold Space"),
+                    for (tool, icon, label, hint) in [
+                        (
+                            Tool::Move,
+                            icons::TOOL_MOVE,
+                            "Move",
+                            "Move selected layer · V",
+                        ),
+                        (
+                            Tool::Hand,
+                            icons::TOOL_PAN,
+                            "Pan",
+                            "Pan canvas · H or hold Space",
+                        ),
                     ] {
-                        if ui
+                        let response = ui
                             .add_sized(
                                 [52.0, 36.0],
-                                egui::Button::new(label).selected(self.tool == tool),
+                                egui::Button::new(
+                                    RichText::new(icon.to_string())
+                                        .size(21.0)
+                                        .color(if self.tool == tool { ACCENT } else { TEXT }),
+                                )
+                                .selected(self.tool == tool),
                             )
-                            .on_hover_text(hint)
-                            .clicked()
-                        {
+                            .on_hover_text(hint);
+                        response.widget_info(|| {
+                            egui::WidgetInfo::selected(
+                                egui::WidgetType::Button,
+                                true,
+                                self.tool == tool,
+                                label,
+                            )
+                        });
+                        if response.clicked() {
                             self.editor.finish_edit();
                             self.move_start = None;
                             self.tool = tool;
                         }
+                        ui.vertical_centered(|ui| {
+                            ui.label(RichText::new(label).size(10.0).color(MUTED));
+                        });
                         ui.add_space(6.0);
                     }
                 });
@@ -452,7 +523,7 @@ impl Studio {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_enabled_ui(!blocked, |ui| {
                             if ui
-                                .small_button("Fit")
+                                .small_button(format!("{} Fit", icons::FIT))
                                 .on_hover_text("Fit canvas · F")
                                 .clicked()
                             {
@@ -499,8 +570,8 @@ fn control(
     value: &mut f32,
     range: std::ops::RangeInclusive<f32>,
     suffix: &str,
-) {
-    ui.scope(|ui| {
+) -> egui::Response {
+    let response = ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = 4.0;
         ui.spacing_mut().interact_size.y = 20.0;
         let mut label = egui::Id::NULL;
@@ -519,7 +590,8 @@ fn control(
         });
         ui.spacing_mut().slider_width = ui.available_width();
         ui.add(egui::Slider::new(value, range).show_value(false))
-            .labelled_by(label);
+            .labelled_by(label)
     });
     ui.add_space(6.0);
+    response.inner
 }
