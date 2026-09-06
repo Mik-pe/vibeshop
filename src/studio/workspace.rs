@@ -569,33 +569,6 @@ fn section(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(text).size(10.0).strong().color(MUTED));
 }
 
-/// One channel of the histogram, scaled so the tallest bin fills the plot.
-fn histogram_row(ui: &mut egui::Ui, bins: &[u32; 256], color: Color32, height: f32) {
-    let peak = bins.iter().copied().max().unwrap_or(1).max(1) as f32;
-    let (rect, _) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::hover());
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 2.0, Color32::from_black_alpha(60));
-    let bar_width = rect.width() / 256.0;
-    for (bin, count) in bins.iter().enumerate() {
-        if *count == 0 {
-            continue;
-        }
-        let bar_height = rect.height() * (*count as f32 / peak).clamp(0.004, 1.0);
-        painter.rect_filled(
-            Rect::from_min_size(
-                egui::pos2(
-                    rect.left() + bin as f32 * bar_width,
-                    rect.bottom() - bar_height,
-                ),
-                egui::vec2(bar_width.max(1.0), bar_height),
-            ),
-            0.0,
-            color.gamma_multiply(0.85),
-        );
-    }
-}
-
 /// Master levels, per-channel curves with a draggable editor, the GPU
 /// histogram of the final composition, and a before/after compare toggle.
 impl Studio {
@@ -670,26 +643,66 @@ impl Studio {
         control(ui, "Gamma", &mut levels.gamma, 0.2..=5.0, "");
         control(ui, "White point", &mut levels.white, 0.51..=1.0, "");
         ui.add_space(6.0);
-        // Histogram of the final composition, computed on the GPU.
+        // Histogram of the final composition, computed on the GPU. The area
+        // is reserved at full height whether or not data has arrived, so the
+        // first readback never shifts the layout (a scrollbar appearing here
+        // would resize the canvas mid-session).
         ui.label(
             RichText::new("HISTOGRAM · final pixels")
                 .size(10.0)
                 .color(MUTED),
         );
         ui.add_space(4.0);
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 110.0), Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 2.0, Color32::from_black_alpha(60));
         if let Some(rows) = &self.histogram_rows {
-            let height = 52.0;
-            histogram_row(ui, &rows[0], Color32::from_rgb(228, 229, 234), height);
-            ui.add_space(2.0);
-            ui.horizontal(|ui| {
-                histogram_row(ui, &rows[1], Color32::from_rgb(224, 67, 67), 26.0);
-            });
-            ui.horizontal(|ui| {
-                histogram_row(ui, &rows[2], Color32::from_rgb(96, 200, 96), 26.0);
-                histogram_row(ui, &rows[3], Color32::from_rgb(88, 122, 236), 26.0);
-            });
+            let peak = rows[0].iter().copied().max().unwrap_or(1).max(1) as f32;
+            let luma = Rect::from_min_max(rect.min, egui::pos2(rect.right(), rect.top() + 56.0));
+            let bar = luma.width() / 256.0;
+            for (bin, count) in rows[0].iter().enumerate() {
+                let h = luma.height() * (*count as f32 / peak).clamp(0.004, 1.0);
+                painter.rect_filled(
+                    Rect::from_min_size(
+                        egui::pos2(luma.left() + bin as f32 * bar, luma.bottom() - h),
+                        egui::vec2(bar.max(1.0), h),
+                    ),
+                    0.0,
+                    Color32::from_rgb(228, 229, 234).gamma_multiply(0.85),
+                );
+            }
+            for (row, color) in [
+                (1, Color32::from_rgb(224, 67, 67)),
+                (2, Color32::from_rgb(96, 200, 96)),
+                (3, Color32::from_rgb(88, 122, 236)),
+            ] {
+                let peak = rows[row].iter().copied().max().unwrap_or(1).max(1) as f32;
+                let band = Rect::from_min_max(
+                    egui::pos2(rect.left(), luma.bottom() + (row - 1) as f32 * 27.0),
+                    egui::pos2(rect.right(), luma.bottom() + (row - 1) as f32 * 27.0 + 26.0),
+                );
+                let bar = band.width() / 256.0;
+                for (bin, count) in rows[row].iter().enumerate() {
+                    let h = band.height() * (*count as f32 / peak).clamp(0.004, 1.0);
+                    painter.rect_filled(
+                        Rect::from_min_size(
+                            egui::pos2(band.left() + bin as f32 * bar, band.bottom() - h),
+                            egui::vec2(bar.max(1.0), h),
+                        ),
+                        0.0,
+                        color.gamma_multiply(0.85),
+                    );
+                }
+            }
         } else {
-            ui.label(RichText::new("measuring…").size(11.0).color(MUTED));
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "measuring…",
+                egui::FontId::proportional(11.0),
+                MUTED,
+            );
         }
         ui.add_space(6.0);
         // Before/after: hold to see unadjusted pixels. Render-time bypass;
