@@ -86,3 +86,14 @@ sums them before the bounded 4 KiB asynchronous readback. There is no second
 compositor or full-image CPU histogram. Histograms add at most 1 MiB of cached
 GPU counters under the existing dimension limits. Timing this generated,
 mostly uniform workload does not establish results for arbitrary photos.
+
+An additional candidate-only run at `b3f423b` adds
+`full_canvas_levels_curve`: after the two exposure scenarios, alternate the
+background's gamma between 1.2/1.0 and its RGB curve midpoint between 0.4/0.5.
+The same generated document, 10 warm-up / 100 samples and render-to-GPU-completion
+timer include per-edit LUT regeneration/upload and active tone evaluation.
+This scenario measured p50 **17.240 ms**, p95 **18.292 ms**. The same run's
+exposure p95 values were 16.972 ms full and 4.410 ms local; process peak RSS across
+all three scenarios was 103,828 KiB. This is a separate run, not a replacement
+for the matched comparison above. Document mutation before `Engine::render`,
+UI input, presentation and per-event allocation counts remain unmeasured.
