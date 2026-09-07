@@ -43,7 +43,7 @@ scripts/smoke.sh
 
 Tests execute the production GPU shaders, compare pixels, round-trip project assets/settings and exercise the actual file controller's open → edit → keyboard save → fresh-editor reopen → PNG path. They also cover malformed/truncated projects, interrupted writes, saved-state undo/redo and late or cancelled file results. Native file-picker interaction is separate from these controller tests.
 
-The smoke script launches the real editor, moves a layer with native input, checks undo/redo against captured canvas pixels, changes exposure and verifies undo again. It writes captures to `artifacts/`. Inspect them and exercise changed controls; the fixed-layout smoke test is not comprehensive UI coverage. Missing GPU or GUI prerequisites fail validation rather than becoming skipped passing tests. Hardware correctness is not a performance benchmark.
+The smoke script launches the real editor, moves a layer with native input, checks undo/redo against captured canvas pixels, changes exposure and a curve, and verifies undo again. It writes captures to `artifacts/`. Inspect them and exercise changed controls; the fixed-layout smoke test is not comprehensive UI coverage. Missing GPU or GUI prerequisites fail validation rather than becoming skipped passing tests. Hardware correctness is not a performance benchmark.
 
 CI uses the dedicated self-hosted runner for trusted branch pushes. Read [runner setup and the trust boundary](docs/RUNNER.md) before connecting a machine. External PRs are not automatically scheduled on that runner by this workflow.
 
