@@ -1,13 +1,19 @@
 use vibeshop::{document::*, gpu::Engine};
 fn engine() -> Engine {
+    engine_with_limits(wgpu::Limits::default())
+}
+fn engine_with_limits(required_limits: wgpu::Limits) -> Engine {
     let instance = wgpu::Instance::default();
     let adapter = pollster::block_on(
         instance.request_adapter(&wgpu::RequestAdapterOptions::default()),
     )
     .expect("GPU tests require a working adapter; CI installs Mesa Vulkan. Do not skip this test.");
     eprintln!("GPU adapter: {:?}", adapter.get_info());
-    let (device, queue) =
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_limits,
+        ..Default::default()
+    }))
+    .unwrap();
     Engine::new(device, queue)
 }
 fn layer(rgba: [u8; 4], w: u32, h: u32) -> Layer {
@@ -356,4 +362,76 @@ fn histogram_counts_nonuniform_pixels_across_both_group_and_tile_edges() {
     let mut e = engine();
     render(&mut e, &d);
     assert_eq!(e.histogram().unwrap().finish().unwrap(), expected);
+}
+
+#[test]
+fn streamed_export_freezes_revision_across_edits_resize_and_short_padded_bands() {
+    use vibeshop::image_io;
+    // The export cannot allocate a whole-image transfer buffer on this device.
+    let mut e = engine_with_limits(wgpu::Limits {
+        max_buffer_size: vibeshop::gpu::EXPORT_STAGING_BYTES,
+        ..Default::default()
+    });
+    // 4352-byte padded rows: 240 rows per 1MiB band and a short final band.
+    let (width, height) = (1027, 515);
+    let mut rgba = Vec::new();
+    for y in 0..height {
+        for x in 0..width {
+            let p = match (x + 3 * y) % 5 {
+                0 => [255, 0, 0, 255],
+                1 => [0, 255, 0, 128],
+                2 => [0, 0, 255, 64],
+                3 => [255, 255, 255, 255],
+                _ => [0, 0, 0, 0],
+            };
+            rgba.extend_from_slice(&p);
+        }
+    }
+    let mut d = Document::new(Layer::new(
+        "bands",
+        Source::new(width, height, rgba.clone()).unwrap(),
+    ));
+    e.render(&d).unwrap();
+    let snapshot = e.readback().unwrap();
+    d.layers[0].exposure = -1.0;
+    e.render(&d).unwrap();
+    e.render(&Document::new(layer([90, 80, 70, 255], 13, 7)))
+        .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("snapshot.png");
+    image_io::save_png_snapshot(&path, snapshot).unwrap();
+    let decoded = image::open(path).unwrap().to_rgba8();
+    assert_eq!(decoded.dimensions(), (width, height));
+    assert_eq!(decoded.as_raw(), &rgba);
+}
+
+#[test]
+fn export_sink_failure_stops_stream_and_keeps_editor_usable() {
+    use std::io::{self, Write};
+    struct FailingSink {
+        rows: usize,
+    }
+    impl Write for FailingSink {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.rows += 1;
+            if self.rows == 250 {
+                return Err(io::Error::other("disk full"));
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut e = engine();
+    let mut d = Document::new(layer([0, 255, 0, 128], 1027, 515));
+    e.render(&d).unwrap();
+    let mut sink = FailingSink { rows: 0 };
+    let error = e.readback().unwrap().write_to(&mut sink).unwrap_err();
+    assert!(error.to_string().contains("disk full"));
+    assert_eq!(sink.rows, 250);
+    d.layers[0].visible = false;
+    assert!(render(&mut e, &d).iter().all(|p| *p == 0));
+    d.layers[0].visible = true;
+    assert_eq!(render(&mut e, &d), [0, 255, 0, 128].repeat(1027 * 515));
 }

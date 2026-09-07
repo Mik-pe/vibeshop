@@ -97,3 +97,61 @@ exposure p95 values were 16.972 ms full and 4.410 ms local; process peak RSS acr
 all three scenarios was 103,828 KiB. This is a separate run, not a replacement
 for the matched comparison above. Document mutation before `Engine::render`,
 UI input, presentation and per-event allocation counts remain unmeasured.
+
+
+## Bounded PNG export workload
+
+`examples/export_bench.rs` measures a generated 3840×2160 raster layer whose
+RGBA values are `(x%256, y%256, (x+y)%256, alternating 128/255 alpha)`. Initial
+composition and its GPU wait happen before timing. Each sample freezes the
+current output and finishes an atomic PNG write, including file sync/replacement.
+There are two warm-up exports and ten measured exports; p50/p95 use nearest ranks
+5/10 of the sorted samples. The temporary destination is on the current working
+directory's filesystem. This measures export completion, not input-to-display
+latency or the native file picker.
+
+Build first, then reuse the existing Linux RSS wrapper so compiler memory is
+excluded:
+
+```sh
+cargo build --locked --release --example export_bench
+scripts/measure-compositor.py target/release/examples/export_bench
+```
+
+For the `4905228` baseline, use the same generated workload and timing loop,
+replacing `save_png_snapshot(&path, snapshot)` with
+`let rgba = snapshot.finish()?; image_io::save_png(&path, 3840, 2160, &rgba)?;`.
+Both use PNG Fast compression and Adaptive filtering. Streamed IDAT chunking
+can change compressed bytes without changing decoded pixels. Run binaries
+sequentially on the same filesystem, with repository GPU tests/benchmarks idle.
+
+The production path retains an immutable full-image RGBA8 GPU snapshot (up to
+64 MiB under current document limits), one reusable transfer buffer of at most
+1 MiB, PNG's 64 KiB output chunks and row/filter/compression workspaces. It does
+not collect full-image CPU pixels. Process RSS includes document/renderer/driver
+and codec memory; it is not a measurement of total GPU residency. Large-document
+limits and device-allocation failure handling remain work in #3.
+
+Measured on 2026-09-07, Intel Iris Plus Graphics (ICL GT2), Mesa 26.2.1,
+Vulkan, Linux 7.1.9-arch1-2 / Omarchy 4.0.2, release builds and the same local
+filesystem. Each row is a separate process with the protocol above; builds and
+repository GPU tests were stopped during measurements. RSS was captured with
+Python `resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss`, as in the wrapper.
+
+| Run order / implementation | p50 ms | p95 ms | Peak RSS KiB | PNG bytes |
+| --- | ---: | ---: | ---: | ---: |
+| 1. Baseline `4905228` | 2023.851 | 2313.387 | 153684 | 19701416 |
+| 2. Initial stream, 4 KiB chunks `105d6ea` | 3331.659 | 3758.227 | 101560 | 19759124 |
+| 3. Final stream, 64 KiB chunks `39a6730` | 152.790 | 249.191 | 102092 | 19705016 |
+| 4. Baseline repeat, same binary | 123.269 | 135.433 | 154232 | 19701416 |
+| 5. Final stream repeat, same binary | 2341.176 | 2735.832 | 101876 | 19705016 |
+
+The unchanged binaries vary dramatically in completion time under this desktop
+and storage environment. These samples do **not** establish a speed improvement
+or a stable latency regression estimate, and are not a timing gate. The closest
+fast pair still shows slower streamed completion. The consistent result is lower
+peak process RSS: roughly 102,000 KiB streamed versus 154,000 KiB baseline (about
+34% less) on this fixture. This does not establish memory or speed behavior for
+all photos. The final implementation uses bounded 64 KiB chunks to avoid the
+initial stream's many small destination writes; no additional caching or
+parallel encoding was introduced.

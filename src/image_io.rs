@@ -1,7 +1,11 @@
 use crate::document::{Layer, MAX_DIMENSION, MAX_SOURCE_BYTES, Source, validate_size};
 use anyhow::{Context, Result, ensure};
-use image::{ImageDecoder, ImageEncoder};
-use std::{fs::File, io::BufReader, path::Path};
+use image::ImageDecoder;
+use std::{
+    fs::File,
+    io::{BufReader, Write},
+    path::Path,
+};
 
 pub fn open(path: &Path) -> Result<Layer> {
     let file = File::open(path).context("Could not open image")?;
@@ -39,13 +43,59 @@ pub fn save_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<()>
         rgba.len() as u64 == u64::from(width) * u64::from(height) * 4,
         "Invalid export pixels"
     );
+    write_png(path, width, height, |stream| Ok(stream.write_all(rgba)?))
+}
+
+/// Encode a frozen GPU revision without collecting full-image CPU pixels.
+/// Call on an IO worker, not the UI thread.
+pub fn save_png_snapshot(path: &Path, snapshot: crate::gpu::Readback) -> Result<()> {
+    let (width, height) = snapshot.dimensions();
+    write_png(path, width, height, |stream| snapshot.write_to(stream))
+}
+
+fn write_png(
+    path: &Path,
+    width: u32,
+    height: u32,
+    write: impl FnOnce(&mut png::StreamWriter<'_, &mut File>) -> Result<()>,
+) -> Result<()> {
+    validate_size(width, height)?;
     crate::storage::write_atomic(path, |file| {
-        image::codecs::png::PngEncoder::new(file).write_image(
-            rgba,
-            width,
-            height,
-            image::ExtendedColorType::Rgba8,
-        )?;
+        let mut encoder = png::Encoder::new(file, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::Fast);
+        encoder.set_filter(png::Filter::Adaptive);
+        let mut writer = encoder.write_header()?;
+        // Larger bounded chunks avoid thousands of tiny destination writes.
+        let mut stream = writer.stream_writer_with_size(64 * 1024)?;
+        write(&mut stream)?;
+        stream.finish()?;
+        writer.finish()?;
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interrupted_stream_preserves_destination_and_removes_partial_png() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("output.png");
+        save_png(&path, 1, 1, &[1, 2, 3, 255]).unwrap();
+        let previous = std::fs::read(&path).unwrap();
+        let result = write_png(&path, 13, 700, |stream| {
+            stream.write_all(&[90, 80, 70, 128].repeat(13 * 300))?;
+            anyhow::bail!("simulated transfer failure");
+        });
+        assert!(result.unwrap_err().to_string().contains("transfer failure"));
+        assert_eq!(std::fs::read(&path).unwrap(), previous);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        // An incomplete stream must also fail during explicit finalization.
+        assert!(write_png(&path, 13, 700, |stream| { Ok(stream.write_all(&[0; 52])?) }).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), previous);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
 }
