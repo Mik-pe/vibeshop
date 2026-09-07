@@ -89,4 +89,4 @@ capture curve
 xdotool key --clearmodifiers ctrl+z
 capture curve-undone
 [[ "$(canvas_hash curve-undone)" == "$original" ]] || { echo 'Undo did not restore curve pixels' >&2; exit 1; }
-printf 'Native UI move, undo, redo, exposure and curve checks passed. Captures: artifacts/\n' 
+printf 'Native UI move, undo, redo, exposure and curve checks passed. Captures: artifacts/\n'
