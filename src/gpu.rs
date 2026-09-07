@@ -4,12 +4,15 @@ use anyhow::{Context, Result, ensure};
 use bytemuck::{Pod, Zeroable};
 use std::{
     collections::{HashMap, HashSet},
+    io::Write,
     sync::mpsc,
     time::Duration,
 };
 use wgpu::util::DeviceExt;
 
 pub const TILE_SIZE: u32 = 512;
+/// Maximum mapped transfer storage for one export, independent of image height.
+pub const EXPORT_STAGING_BYTES: u64 = 1024 * 1024;
 
 // Only pixel-affecting state is retained; names and old source assets are not.
 #[derive(Clone, PartialEq)]
@@ -491,39 +494,29 @@ impl Engine {
             .targets
             .as_ref()
             .context("Render an image before exporting")?;
-        let stride = (t.width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
-            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Export snapshot"),
-            size: u64::from(stride) * u64::from(t.height),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
+        // Freeze the requested revision before a file dialog or later edits. A texture
+        // handle alone would alias the live output; bands must all see this snapshot.
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Immutable export snapshot"),
+            size: t.export.texture.size(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
         });
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        encoder.copy_texture_to_buffer(
+        encoder.copy_texture_to_texture(
             t.export.texture.as_image_copy(),
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(stride),
-                    rows_per_image: Some(t.height),
-                },
-            },
-            wgpu::Extent3d {
-                width: t.width,
-                height: t.height,
-                depth_or_array_layers: 1,
-            },
+            texture.as_image_copy(),
+            texture.size(),
         );
-        let submission = self.queue.submit([encoder.finish()]);
+        self.queue.submit([encoder.finish()]);
         Ok(Readback {
             device: self.device.clone(),
-            buffer,
-            submission,
-            width: t.width,
-            height: t.height,
-            stride,
+            queue: self.queue.clone(),
+            texture,
         })
     }
     /// Copy out the 1024-bin histogram computed during the last render.
@@ -572,34 +565,89 @@ fn dispatch(
 
 pub struct Readback {
     device: wgpu::Device,
-    buffer: wgpu::Buffer,
-    submission: wgpu::SubmissionIndex,
-    pub width: u32,
-    pub height: u32,
-    stride: u32,
+    queue: wgpu::Queue,
+    texture: wgpu::Texture,
 }
 impl Readback {
-    // Call from an IO worker or test, never from the interactive UI thread.
-    pub fn finish(self) -> Result<Vec<u8>> {
-        let (tx, rx) = mpsc::sync_channel(1);
-        self.buffer
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, move |result| {
-                let _ = tx.send(result);
-            });
-        self.device.poll(wgpu::PollType::Wait {
-            submission_index: Some(self.submission),
-            timeout: Some(Duration::from_secs(30)),
-        })?;
-        rx.recv_timeout(Duration::from_secs(30))
-            .context("GPU export timed out")??;
-        let mapped = self.buffer.slice(..).get_mapped_range();
-        let mut pixels = Vec::with_capacity((self.width * self.height * 4) as usize);
-        for row in mapped.chunks_exact(self.stride as usize) {
-            pixels.extend_from_slice(&row[..self.width as usize * 4]);
+    pub fn dimensions(&self) -> (u32, u32) {
+        (self.texture.width(), self.texture.height())
+    }
+
+    /// Stream straight-alpha RGBA8 rows from the frozen revision. Call on an IO
+    /// worker: each band waits for the GPU and is consumed before reusing storage.
+    pub fn write_to(self, writer: &mut impl Write) -> Result<()> {
+        let (width, height) = self.dimensions();
+        let stride = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let rows = (EXPORT_STAGING_BYTES / u64::from(stride)).min(u64::from(height)) as u32;
+        ensure!(rows > 0, "Image row exceeds the export staging budget");
+        let size = u64::from(stride) * u64::from(rows);
+        ensure!(
+            size <= self.device.limits().max_buffer_size,
+            "Export staging exceeds device limits"
+        );
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Bounded export band"),
+            size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        for y in (0..height).step_by(rows as usize) {
+            let count = rows.min(height - y);
+            let mut encoder = self.device.create_command_encoder(&Default::default());
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    origin: wgpu::Origin3d { x: 0, y, z: 0 },
+                    ..self.texture.as_image_copy()
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(stride),
+                        rows_per_image: Some(count),
+                    },
+                },
+                wgpu::Extent3d {
+                    width,
+                    height: count,
+                    depth_or_array_layers: 1,
+                },
+            );
+            let submission = self.queue.submit([encoder.finish()]);
+            let (tx, rx) = mpsc::sync_channel(1);
+            buffer
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |result| {
+                    let _ = tx.send(result);
+                });
+            self.device.poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: Some(Duration::from_secs(30)),
+            })?;
+            rx.recv_timeout(Duration::from_secs(30))
+                .context("GPU export timed out")??;
+            let result = (|| -> Result<()> {
+                let mapped = buffer.slice(..).get_mapped_range();
+                for row in mapped.chunks_exact(stride as usize).take(count as usize) {
+                    writer.write_all(&row[..width as usize * 4])?;
+                }
+                Ok(())
+            })();
+            // Release mapping even when the encoder/destination rejects a row.
+            buffer.unmap();
+            result?;
         }
-        drop(mapped);
-        self.buffer.unmap();
+        Ok(())
+    }
+
+    /// Collect pixels for callers that explicitly need them (e.g. reference tests).
+    /// Production PNG export streams through [`Self::write_to`] instead.
+    pub fn finish(self) -> Result<Vec<u8>> {
+        let mut pixels = Vec::new();
+        let (width, height) = self.dimensions();
+        pixels.try_reserve_exact(width as usize * height as usize * 4)?;
+        self.write_to(&mut pixels)?;
         Ok(pixels)
     }
 }

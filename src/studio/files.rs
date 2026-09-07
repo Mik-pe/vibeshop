@@ -159,9 +159,7 @@ impl Studio {
                 return Ok(Job::Cancelled);
             };
             let path = png_destination(file.path())?;
-            let (width, height) = (snapshot.width, snapshot.height);
-            let pixels = snapshot.finish()?;
-            image_io::save_png(&path, width, height, &pixels)?;
+            image_io::save_png_snapshot(&path, snapshot)?;
             Ok(Job::Exported(path))
         });
     }

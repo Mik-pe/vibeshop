@@ -140,7 +140,8 @@ fn project_open_keyboard_save_reopen_and_export_keep_the_same_pixels() {
     let after = pixels(&mut reopened);
     assert_eq!(before, after);
     assert_eq!(reopened.editor.document.layers.len(), 2);
-    image_io::save_png(&export, 13, 7, &after).unwrap();
+    let snapshot = reopened.export_snapshot().unwrap();
+    image_io::save_png_snapshot(&export, snapshot).unwrap();
     assert_eq!(image_io::open(&export).unwrap().source.rgba, after);
     assert_eq!(std::fs::read(input).unwrap(), original_file);
 }

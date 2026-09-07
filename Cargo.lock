@@ -3092,6 +3092,7 @@ dependencies = [
  "bytemuck",
  "eframe",
  "image",
+ "png",
  "pollster",
  "rfd",
  "tempfile",
