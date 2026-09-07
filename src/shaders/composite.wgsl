@@ -1,4 +1,4 @@
-struct Parameters { tone: vec4<f32>, offset: vec2<i32>, blend: u32, padding: u32 }
+struct Parameters { tone: vec4<f32>, offset: vec2<i32>, blend: u32, clear_backdrop: u32 }
 @group(0) @binding(0) var source: texture_2d<f32>;
 @group(0) @binding(1) var backdrop: texture_2d<f32>;
 @group(0) @binding(2) var output: texture_storage_2d<rgba16float, write>;
@@ -11,7 +11,9 @@ fn linear(s: vec3<f32>) -> vec3<f32> {
 fn composite(@builtin(global_invocation_id) id: vec3<u32>) {
     if any(id.xy >= textureDimensions(output)) { return; }
     let at = vec2<i32>(id.xy);
-    let below = textureLoad(backdrop, at, 0);
+    // The first intersecting layer starts transparent, without a separate clear pass.
+    var below = vec4(0.0);
+    if p.clear_backdrop == 0u { below = textureLoad(backdrop, at, 0); }
     let source_coord = at - p.offset;
     if any(source_coord < vec2(0)) || any(source_coord >= vec2<i32>(textureDimensions(source))) {
         textureStore(output, at, below); return;
