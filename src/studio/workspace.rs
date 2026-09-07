@@ -651,7 +651,7 @@ impl Studio {
             self.curve_handle = Some(handle);
         }
         ui.label(
-            RichText::new("←/→ select · ↑/↓ output · Delete release")
+            RichText::new("Left/Right select · Up/Down output · Delete release")
                 .size(10.0)
                 .color(MUTED),
         );

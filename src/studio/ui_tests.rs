@@ -727,6 +727,8 @@ fn tone_keyboard_drag_cancellation_and_compare_are_real_controls() {
             h.frame(Vec::new());
         }
         assert!(h.app.histogram_rows.is_some());
+        h.frame(Vec::new());
+        h.capture(&format!("tone-histogram-final-{scale}"));
     }
 }
 
