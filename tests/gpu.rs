@@ -323,3 +323,37 @@ fn curve_cache_and_tile_histograms_follow_edits_empty_tiles_and_transparency() {
     render(&mut e, &d);
     assert_eq!(e.histogram().unwrap().finish().unwrap(), [[0; 256]; 4]);
 }
+
+#[test]
+fn histogram_counts_nonuniform_pixels_across_both_group_and_tile_edges() {
+    let (width, height) = (519, 37);
+    let palette = [
+        [255, 0, 0, 255],
+        [0, 255, 0, 255],
+        [0, 0, 255, 255],
+        [255, 255, 255, 255],
+        [255, 255, 255, 0],
+    ];
+    let mut bytes = Vec::new();
+    let mut expected = [[0_u32; 256]; 4];
+    for y in 0..height {
+        for x in 0..width {
+            let index = ((x + 3 * y) % 5) as usize;
+            bytes.extend_from_slice(&palette[index]);
+            if index == 4 {
+                continue;
+            }
+            expected[0][[54, 182, 18, 255][index]] += 1;
+            for channel in 0..3 {
+                expected[channel + 1][palette[index][channel] as usize] += 1;
+            }
+        }
+    }
+    let d = Document::new(Layer::new(
+        "nonuniform histogram",
+        Source::new(width, height, bytes).unwrap(),
+    ));
+    let mut e = engine();
+    render(&mut e, &d);
+    assert_eq!(e.histogram().unwrap().finish().unwrap(), expected);
+}

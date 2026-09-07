@@ -103,7 +103,6 @@ pub struct Engine {
     pub queue: wgpu::Queue,
     composite: wgpu::ComputePipeline,
     encode: wgpu::ComputePipeline,
-    histogram_pipeline: wgpu::ComputePipeline,
     histogram_reduce: wgpu::ComputePipeline,
     curve_luts: Vec<([Curve; 4], wgpu::Texture)>,
     compare: bool,
@@ -134,16 +133,6 @@ impl Engine {
             compilation_options: Default::default(),
             cache: None,
         });
-        let histogram_shader =
-            device.create_shader_module(wgpu::include_wgsl!("shaders/histogram.wgsl"));
-        let histogram_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Tile histogram"),
-            layout: None,
-            module: &histogram_shader,
-            entry_point: Some("histogram_pass"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
         let reduce_shader =
             device.create_shader_module(wgpu::include_wgsl!("shaders/histogram_reduce.wgsl"));
         let histogram_reduce = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -159,7 +148,6 @@ impl Engine {
             queue,
             composite,
             encode,
-            histogram_pipeline,
             histogram_reduce,
             curve_luts: Vec::new(),
             compare: false,
@@ -421,9 +409,16 @@ impl Engine {
                     .device
                     .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("Tile output origin"),
-                        contents: bytemuck::cast_slice(&[x, y, u32::from(empty), 0]),
+                        contents: bytemuck::cast_slice(&[
+                            x,
+                            y,
+                            u32::from(empty),
+                            index as u32 * 1024,
+                        ]),
                         usage: wgpu::BufferUsages::UNIFORM,
                     });
+                // Replacing an empty tile must also erase its previous bin counts.
+                encoder.clear_buffer(&t.histogram_tiles, index as u64 * 4096, Some(4096));
                 let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("Display and export"),
                     layout: &self.encode.get_bind_group_layout(0),
@@ -444,47 +439,18 @@ impl Engine {
                             binding: 3,
                             resource: origin.as_entire_binding(),
                         },
-                    ],
-                });
-                dispatch(&mut encoder, &self.encode, &bind, width, height);
-                // Replace only this tile's cached bins, including newly empty tiles.
-                encoder.clear_buffer(&t.histogram_tiles, index as u64 * 4096, Some(4096));
-                let info = self
-                    .device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("Histogram tile bounds"),
-                        contents: bytemuck::cast_slice(&[
-                            width,
-                            height,
-                            index as u32 * 1024,
-                            u32::from(empty),
-                        ]),
-                        usage: wgpu::BufferUsages::UNIFORM,
-                    });
-                let histogram_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("Tile histogram"),
-                    layout: &self.histogram_pipeline.get_bind_group_layout(0),
-                    entries: &[
                         wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&t.scratch[current].view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
+                            binding: 4,
                             resource: t.histogram_tiles.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: info.as_entire_binding(),
                         },
                     ],
                 });
                 dispatch(
                     &mut encoder,
-                    &self.histogram_pipeline,
-                    &histogram_bind,
-                    width,
-                    height,
+                    &self.encode,
+                    &bind,
+                    width.div_ceil(4),
+                    height.div_ceil(4),
                 );
                 t.tiles[index] = keys;
             }

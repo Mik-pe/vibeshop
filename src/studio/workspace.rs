@@ -668,16 +668,18 @@ impl Studio {
             self.curve_handle = Some(handle);
             let mut value = curve.eval(handle as f32 / 32.0);
             let output_label = ui.label("Output");
-            if ui
+            let value_response = ui
                 .add(
                     egui::DragValue::new(&mut value)
                         .range(0.0..=1.0)
                         .speed(0.001)
                         .fixed_decimals(3),
                 )
-                .labelled_by(output_label.id)
-                .changed()
-            {
+                .labelled_by(output_label.id);
+            value_response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::DragValue, true, "Curve output")
+            });
+            if value_response.changed() {
                 let _ = curve.set(handle, value);
             }
         });
@@ -717,6 +719,7 @@ impl Studio {
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 2.0, Color32::from_black_alpha(60));
         if let Some(rows) = &self.histogram_rows
+            && self.gpu.render_valid()
             && self.histogram_revision == self.gpu.renders
         {
             let peak = rows[0].iter().copied().max().unwrap_or(1).max(1) as f32;
@@ -760,7 +763,11 @@ impl Studio {
             painter.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
-                "measuring…",
+                if self.histogram_error.is_some() || !self.gpu.render_valid() {
+                    "Histogram unavailable"
+                } else {
+                    "measuring…"
+                },
                 egui::FontId::proportional(11.0),
                 MUTED,
             );
@@ -773,10 +780,22 @@ impl Studio {
         let endpoints = self
             .histogram_rows
             .as_ref()
-            .filter(|_| self.histogram_revision == self.gpu.renders)
+            .filter(|_| self.gpu.render_valid() && self.histogram_revision == self.gpu.renders)
             .map(|rows| format!("Luma end bins: {} / {}", rows[0][0], rows[0][255]))
-            .unwrap_or_else(|| "Luma end bins: measuring…".into());
+            .unwrap_or_else(|| {
+                if self.histogram_error.is_some() || !self.gpu.render_valid() {
+                    "Luma end bins: unavailable".into()
+                } else {
+                    "Luma end bins: measuring…".into()
+                }
+            });
         ui.label(RichText::new(endpoints).size(10.0)).on_hover_text("Counts in bins 0 and 255; these include endpoint values and do not prove clipping before tone adjustments.");
+        if let Some(error) = &self.histogram_error {
+            ui.label(RichText::new("Histogram unavailable; edit to retry").size(10.0))
+                .on_hover_text(error);
+        } else {
+            ui.label(RichText::new(" ").size(10.0));
+        }
         ui.add_space(6.0);
         // Before/after toggles a render-time bypass;
         // the document is untouched and no history entry is created.
@@ -860,7 +879,7 @@ impl Studio {
             response.request_focus();
             self.curve_drag = Some(curve.clone());
             self.curve_cancelled = false;
-            if let Some(pointer) = response.interact_pointer_pos() {
+            if let Some(pointer) = ui.input(|i| i.pointer.press_origin()) {
                 self.curve_handle = grid_index((pointer.x - rect.left()) / rect.width());
             }
         }
@@ -930,8 +949,11 @@ fn control(
             });
         });
         ui.spacing_mut().slider_width = ui.available_width();
-        ui.add(egui::Slider::new(value, range).show_value(false))
-            .labelled_by(label)
+        let slider = ui
+            .add(egui::Slider::new(value, range).show_value(false))
+            .labelled_by(label);
+        slider.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Slider, true, text));
+        slider
     });
     ui.add_space(6.0);
     response.inner

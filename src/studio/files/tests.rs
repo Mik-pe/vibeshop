@@ -49,6 +49,7 @@ fn studio() -> (Studio, egui::Context) {
             curve_cancelled: false,
             histogram: None,
             histogram_rows: None,
+            histogram_error: None,
             histogram_revision: 0,
             compare: false,
             allow_close: false,

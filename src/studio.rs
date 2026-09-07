@@ -56,6 +56,7 @@ pub struct Studio {
     /// Histogram readback job: polls for completion without blocking.
     histogram: Option<(u64, Receiver<Result<vibeshop::gpu::HistogramData>>)>,
     histogram_rows: Option<vibeshop::gpu::HistogramData>,
+    histogram_error: Option<String>,
     /// Document revision the displayed histogram describes.
     histogram_revision: u64,
     /// Preview unadjusted tones; exported pixels always use document adjustments.
@@ -109,6 +110,7 @@ impl Studio {
             curve_cancelled: false,
             histogram: None,
             histogram_rows: None,
+            histogram_error: None,
             histogram_revision: 0,
             compare: false,
         }
@@ -402,7 +404,16 @@ impl Studio {
                     }
                     self.histogram = None;
                 }
-                Ok(Err(_)) | Err(TryRecvError::Disconnected) => {
+                Ok(Err(error)) => {
+                    self.histogram_revision = *generation;
+                    self.histogram_rows = None;
+                    self.histogram_error = Some(error.to_string());
+                    self.histogram = None;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.histogram_revision = *generation;
+                    self.histogram_rows = None;
+                    self.histogram_error = Some("Histogram worker stopped".into());
                     self.histogram = None;
                 }
                 Err(TryRecvError::Empty) => {
@@ -414,6 +425,7 @@ impl Studio {
             && self.histogram_revision != self.gpu.renders
             && let Ok(readback) = self.gpu.histogram()
         {
+            self.histogram_error = None;
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
             let ctx = ctx.clone();
             std::thread::spawn(move || {
