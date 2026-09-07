@@ -67,7 +67,8 @@ fn write_png(
         encoder.set_compression(png::Compression::Fast);
         encoder.set_filter(png::Filter::Adaptive);
         let mut writer = encoder.write_header()?;
-        let mut stream = writer.stream_writer()?;
+        // Larger bounded chunks avoid thousands of tiny destination writes.
+        let mut stream = writer.stream_writer_with_size(64 * 1024)?;
         write(&mut stream)?;
         stream.finish()?;
         writer.finish()?;
