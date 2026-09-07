@@ -1,5 +1,5 @@
-use crate::curves::{CURVE_POINTS, levels_uniform};
-use crate::document::Document;
+use crate::curves::{Curve, Levels, levels_uniform};
+use crate::document::{Blend, Document, Layer};
 use anyhow::{Context, Result, ensure};
 use bytemuck::{Pod, Zeroable};
 use std::{
@@ -9,22 +9,55 @@ use std::{
 };
 use wgpu::util::DeviceExt;
 
+pub const TILE_SIZE: u32 = 512;
+
+// Only pixel-affecting state is retained; names and old source assets are not.
+#[derive(Clone, PartialEq)]
+struct LayerKey {
+    source: u64,
+    tone: [f32; 4],
+    offset: [i32; 2],
+    blend: Blend,
+    levels: Levels,
+    curves: [Curve; 4],
+}
+impl From<&Layer> for LayerKey {
+    fn from(layer: &Layer) -> Self {
+        Self {
+            source: layer.source.id,
+            tone: [
+                layer.exposure,
+                layer.contrast,
+                layer.saturation,
+                layer.opacity,
+            ],
+            offset: layer.offset,
+            blend: layer.blend,
+            levels: layer.levels,
+            curves: layer.curves.clone(),
+        }
+    }
+}
+fn intersects(layer: &Layer, x: u32, y: u32, width: u32, height: u32) -> bool {
+    let [lx, ly] = layer.offset.map(i64::from);
+    layer.visible
+        && layer.opacity > 0.0
+        && lx < i64::from(x + width)
+        && ly < i64::from(y + height)
+        && lx + i64::from(layer.source.width) > i64::from(x)
+        && ly + i64::from(layer.source.height) > i64::from(y)
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Parameters {
     tone: [f32; 4],
     offset: [i32; 2],
     blend: u32,
-    padding: u32,
-    // Linear-light master levels: (input black, input white, 1/gamma).
+    clear_backdrop: u32,
     levels: [f32; 3],
-    // Bit 0 RGB, 1 R, 2 G, 3 B.
     curve_mask: u32,
 }
-
-/// Rows: 0 RGB, 1 R, 2 G, 3 B. 256 columns of pre-evaluated curve output.
-const CURVE_ROWS: u32 = 4;
-const CURVE_LUT_WIDTH: u32 = 256;
 
 struct Surface {
     texture: wgpu::Texture,
@@ -60,6 +93,9 @@ struct Targets {
     scratch: [Surface; 2],
     display: Surface,
     export: Surface,
+    tiles: Vec<Vec<LayerKey>>,
+    histogram_tiles: wgpu::Buffer,
+    histogram: wgpu::Buffer,
 }
 
 pub struct Engine {
@@ -67,16 +103,15 @@ pub struct Engine {
     pub queue: wgpu::Queue,
     composite: wgpu::ComputePipeline,
     encode: wgpu::ComputePipeline,
-    histogram: wgpu::ComputePipeline,
+    histogram_pipeline: wgpu::ComputePipeline,
+    histogram_reduce: wgpu::ComputePipeline,
+    curve_luts: Vec<([Curve; 4], wgpu::Texture)>,
+    compare: bool,
     sources: HashMap<u64, Surface>,
     targets: Option<Targets>,
-    curve_lut: Option<(wgpu::Texture, [u32; 4])>,
-    histogram_buffer: Option<wgpu::Buffer>,
-    /// Before/after comparison: render every layer with tonal adjustments
-    /// bypassed. Render-time only; never mutates the document.
-    compare: bool,
     pub uploads: u64,
     pub renders: u64,
+    pub tiles_rendered: u64,
     render_valid: bool,
 }
 impl Engine {
@@ -99,12 +134,23 @@ impl Engine {
             compilation_options: Default::default(),
             cache: None,
         });
-        let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/histogram.wgsl"));
-        let histogram = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Tone histogram"),
+        let histogram_shader =
+            device.create_shader_module(wgpu::include_wgsl!("shaders/histogram.wgsl"));
+        let histogram_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Tile histogram"),
             layout: None,
-            module: &shader,
+            module: &histogram_shader,
             entry_point: Some("histogram_pass"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let reduce_shader =
+            device.create_shader_module(wgpu::include_wgsl!("shaders/histogram_reduce.wgsl"));
+        let histogram_reduce = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Histogram total"),
+            layout: None,
+            module: &reduce_shader,
+            entry_point: Some("reduce"),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -113,25 +159,29 @@ impl Engine {
             queue,
             composite,
             encode,
-            histogram,
+            histogram_pipeline,
+            histogram_reduce,
+            curve_luts: Vec::new(),
+            compare: false,
             sources: HashMap::new(),
             targets: None,
-            curve_lut: None,
-            histogram_buffer: None,
-            compare: false,
             uploads: 0,
             renders: 0,
+            tiles_rendered: 0,
             render_valid: false,
         }
     }
-    /// Show the unadjusted sources instead of the edited composition.
     pub fn set_compare(&mut self, compare: bool) {
         if self.compare != compare {
             self.compare = compare;
             self.render_valid = false;
         }
     }
+    pub fn render_valid(&self) -> bool {
+        self.render_valid
+    }
     pub fn render(&mut self, document: &Document) -> Result<bool> {
+        let previous_valid = self.render_valid;
         self.render_valid = false;
         document.validate()?;
         let limit = self.device.limits().max_texture_dimension_2d;
@@ -155,11 +205,40 @@ impl Engine {
                 width: document.width,
                 height: document.height,
                 scratch: [
-                    make(wgpu::TextureFormat::Rgba16Float),
-                    make(wgpu::TextureFormat::Rgba16Float),
+                    Surface::new(
+                        &self.device,
+                        TILE_SIZE,
+                        TILE_SIZE,
+                        wgpu::TextureFormat::Rgba16Float,
+                    ),
+                    Surface::new(
+                        &self.device,
+                        TILE_SIZE,
+                        TILE_SIZE,
+                        wgpu::TextureFormat::Rgba16Float,
+                    ),
                 ],
                 display: make(wgpu::TextureFormat::Rgba8Unorm),
                 export: make(wgpu::TextureFormat::Rgba8Unorm),
+                histogram_tiles: self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Cached tile histograms"),
+                    size: u64::from(
+                        document.width.div_ceil(TILE_SIZE) * document.height.div_ceil(TILE_SIZE),
+                    ) * 4096,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+                histogram: self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Histogram total"),
+                    size: 4096,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                }),
+                tiles: vec![
+                    Vec::new();
+                    (document.width.div_ceil(TILE_SIZE) * document.height.div_ceil(TILE_SIZE))
+                        as usize
+                ],
             });
         }
         let active: HashSet<_> = document.layers.iter().map(|l| l.source.id).collect();
@@ -193,244 +272,251 @@ impl Engine {
                 self.uploads += 1;
             }
         }
-        let neutral_curves: [crate::curves::Curve; 4] = Default::default();
-        // Pre-upload every curve LUT before borrowing the target views:
-        // upload_curve_lut needs &mut self, the bind groups need &self.
-        let mut lut_views = Vec::with_capacity(document.layers.len());
-        for layer in document
-            .layers
-            .iter()
-            .filter(|l| l.visible && l.opacity > 0.0)
-        {
-            let uses_curves = layer.curves.iter().any(|curve| !curve.is_neutral());
-            let curves = if uses_curves {
-                &layer.curves
-            } else {
-                &neutral_curves
-            };
-            lut_views.push(self.upload_curve_lut(curves));
-        }
-        let t = self.targets.as_ref().context("No GPU targets")?;
-        let mut encoder = self.device.create_command_encoder(&Default::default());
-        {
-            let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Clear composition"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &t.scratch[0].view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-        }
-        let mut current = 0;
-        for (layer_index, layer) in document
-            .layers
-            .iter()
-            .filter(|l| l.visible && l.opacity > 0.0)
-            .enumerate()
-        {
-            let mut curve_mask = 0_u32;
-            for (bit, curve) in layer.curves.iter().enumerate() {
-                if !curve.is_neutral() {
-                    curve_mask |= 1 << bit;
-                }
-            }
-            // Before/after comparison bypasses every tonal adjustment.
-            let (levels, curve_mask) = if self.compare {
-                ([0.0, 1.0, 1.0], 0)
-            } else {
-                (levels_uniform(&layer.levels), curve_mask)
-            };
-            let parameters = Parameters {
-                tone: [
-                    layer.exposure,
-                    layer.contrast,
-                    layer.saturation,
-                    layer.opacity,
-                ],
-                offset: layer.offset,
-                blend: layer.blend as u32,
-                padding: 0,
-                levels,
-                curve_mask,
-            };
-            let uniform = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Layer adjustments"),
-                    contents: bytemuck::bytes_of(&parameters),
-                    usage: wgpu::BufferUsages::UNIFORM,
-                });
-            // The LUT for this layer was uploaded before the targets borrow.
-            let lut_view = &lut_views[layer_index];
-            let source = &self.sources[&layer.source.id];
-            let mut entries = vec![
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&source.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&t.scratch[current].view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&t.scratch[1 - current].view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: uniform.as_entire_binding(),
-                },
-            ];
-            entries.push(wgpu::BindGroupEntry {
-                binding: 4,
-                resource: wgpu::BindingResource::TextureView(lut_view),
-            });
-            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Layer inputs"),
-                layout: &self.composite.get_bind_group_layout(0),
-                entries: &entries,
-            });
-            dispatch(&mut encoder, &self.composite, &bind, t.width, t.height);
-            current = 1 - current;
-        }
-        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Display and export"),
-            layout: &self.encode.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&t.scratch[current].view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&t.display.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&t.export.view),
-                },
-            ],
-        });
-        dispatch(&mut encoder, &self.encode, &bind, t.width, t.height);
-        // Bump the histogram along the same submission: it reads the final
-        // linear-light composition the encode pass just consumed.
-        let buffer = self.histogram_buffer.get_or_insert_with(|| {
-            self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Tone histogram"),
-                size: 1024 * 4,
-                usage: wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::COPY_SRC
-                    | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            })
-        });
-        encoder.clear_buffer(buffer, 0, None);
-        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Histogram input"),
-            layout: &self.histogram.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&t.scratch[current].view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: buffer.as_entire_binding(),
-                },
-            ],
-        });
-        dispatch(&mut encoder, &self.histogram, &bind, t.width, t.height);
-        self.queue.submit([encoder.finish()]);
-        self.renders += 1;
-        self.render_valid = true;
-        Ok(resized)
-    }
-    /// Upload (or reuse) the 256x4 curve LUT for one layer.
-    fn upload_curve_lut(&mut self, curves: &[crate::curves::Curve; 4]) -> wgpu::TextureView {
-        let mut fingerprint = [0_u32; 4];
-        let mut data = Vec::with_capacity((CURVE_ROWS * CURVE_LUT_WIDTH * 4) as usize);
-        for (row, curve) in curves.iter().enumerate() {
-            for index in 0..CURVE_POINTS {
-                if let Some(value) = curve.get(index) {
-                    let bits = (value.to_bits()).rotate_left((index % 31) as u32);
-                    fingerprint[row] = fingerprint[row].wrapping_mul(0x9E3779B1).wrapping_add(bits);
-                }
-            }
-            if curve.is_neutral() {
-                // Identity ramp rows still exist so sampling stays defined.
-                for x in 0..CURVE_LUT_WIDTH {
-                    let v = x as f32 / 255.0;
-                    data.extend_from_slice(&v.to_ne_bytes());
-                }
+        self.curve_luts.truncate(document.layers.len());
+        for (index, layer) in document.layers.iter().enumerate() {
+            if self
+                .curve_luts
+                .get(index)
+                .is_some_and(|(curves, _)| *curves == layer.curves)
+            {
                 continue;
             }
-            for x in 0..CURVE_LUT_WIDTH {
-                let v = curve.eval(x as f32 / 255.0);
-                data.extend_from_slice(&v.to_ne_bytes());
-            }
-        }
-        let reused = self
-            .curve_lut
-            .as_ref()
-            .is_some_and(|(_, seen)| *seen == fingerprint);
-        if !reused {
-            let format = wgpu::TextureFormat::R32Float;
             let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("Curve LUT"),
+                label: Some("Layer curve LUT"),
                 size: wgpu::Extent3d {
-                    width: CURVE_LUT_WIDTH,
-                    height: CURVE_ROWS,
+                    width: 256,
+                    height: 4,
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format,
+                format: wgpu::TextureFormat::R32Float,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             });
-            // One row per copy: bytes_per_row must be a multiple of 256.
-            for row in 0..CURVE_ROWS {
-                let start = (row * CURVE_LUT_WIDTH * 4) as usize;
-                self.queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d { x: 0, y: row, z: 0 },
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    &data[start..start + (CURVE_LUT_WIDTH * 4) as usize],
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(CURVE_LUT_WIDTH * 4),
-                        rows_per_image: Some(1),
-                    },
-                    wgpu::Extent3d {
-                        width: CURVE_LUT_WIDTH,
-                        height: 1,
-                        depth_or_array_layers: 1,
-                    },
-                );
+            let values: Vec<f32> = layer
+                .curves
+                .iter()
+                .flat_map(|curve| (0..256).map(move |x| curve.eval(x as f32 / 255.0)))
+                .collect();
+            self.queue.write_texture(
+                texture.as_image_copy(),
+                bytemuck::cast_slice(&values),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(1024),
+                    rows_per_image: Some(4),
+                },
+                wgpu::Extent3d {
+                    width: 256,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+            );
+            if index == self.curve_luts.len() {
+                self.curve_luts.push((layer.curves.clone(), texture));
+            } else {
+                self.curve_luts[index] = (layer.curves.clone(), texture);
             }
-            let view = texture.create_view(&Default::default());
-            self.curve_lut = Some((texture, fingerprint));
-            return view;
         }
-        let (texture, _) = self.curve_lut.as_ref().unwrap();
-        texture.create_view(&Default::default())
+        let lut_views: Vec<_> = self
+            .curve_luts
+            .iter()
+            .map(|(_, texture)| texture.create_view(&Default::default()))
+            .collect();
+        let t = self.targets.as_mut().context("No GPU targets")?;
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        let mut changed = 0;
+        for y in (0..t.height).step_by(TILE_SIZE as usize) {
+            for x in (0..t.width).step_by(TILE_SIZE as usize) {
+                let width = TILE_SIZE.min(t.width - x);
+                let height = TILE_SIZE.min(t.height - y);
+                let layers: Vec<_> = document
+                    .layers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, l)| intersects(l, x, y, width, height))
+                    .collect();
+                let keys: Vec<_> = layers.iter().map(|(_, l)| LayerKey::from(*l)).collect();
+                let index = (y / TILE_SIZE * t.width.div_ceil(TILE_SIZE) + x / TILE_SIZE) as usize;
+                if previous_valid && !resized && t.tiles[index] == keys {
+                    continue;
+                }
+                changed += 1;
+                let mut current = 0;
+                let empty = layers.is_empty();
+                for (layer_index, (document_index, layer)) in layers.into_iter().enumerate() {
+                    let parameters = Parameters {
+                        tone: [
+                            if self.compare { 0.0 } else { layer.exposure },
+                            if self.compare { 1.0 } else { layer.contrast },
+                            if self.compare { 1.0 } else { layer.saturation },
+                            layer.opacity,
+                        ],
+                        offset: [layer.offset[0] - x as i32, layer.offset[1] - y as i32],
+                        blend: layer.blend as u32,
+                        clear_backdrop: u32::from(layer_index == 0),
+                        levels: levels_uniform(&if self.compare {
+                            Levels::default()
+                        } else {
+                            layer.levels
+                        }),
+                        curve_mask: if self.compare {
+                            0
+                        } else {
+                            layer
+                                .curves
+                                .iter()
+                                .enumerate()
+                                .fold(0, |mask, (bit, curve)| {
+                                    mask | (u32::from(!curve.is_neutral()) << bit)
+                                })
+                        },
+                    };
+                    let uniform =
+                        self.device
+                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("Layer adjustments"),
+                                contents: bytemuck::bytes_of(&parameters),
+                                usage: wgpu::BufferUsages::UNIFORM,
+                            });
+                    let source = &self.sources[&layer.source.id];
+                    let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("Layer inputs"),
+                        layout: &self.composite.get_bind_group_layout(0),
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&source.view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &t.scratch[current].view,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &t.scratch[1 - current].view,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: uniform.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &lut_views[document_index],
+                                ),
+                            },
+                        ],
+                    });
+                    dispatch(&mut encoder, &self.composite, &bind, width, height);
+                    current = 1 - current;
+                }
+                let origin = self
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Tile output origin"),
+                        contents: bytemuck::cast_slice(&[x, y, u32::from(empty), 0]),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    });
+                let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Display and export"),
+                    layout: &self.encode.get_bind_group_layout(0),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&t.scratch[current].view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&t.display.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&t.export.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: origin.as_entire_binding(),
+                        },
+                    ],
+                });
+                dispatch(&mut encoder, &self.encode, &bind, width, height);
+                // Replace only this tile's cached bins, including newly empty tiles.
+                encoder.clear_buffer(&t.histogram_tiles, index as u64 * 4096, Some(4096));
+                let info = self
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Histogram tile bounds"),
+                        contents: bytemuck::cast_slice(&[
+                            width,
+                            height,
+                            index as u32 * 1024,
+                            u32::from(empty),
+                        ]),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    });
+                let histogram_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Tile histogram"),
+                    layout: &self.histogram_pipeline.get_bind_group_layout(0),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&t.scratch[current].view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: t.histogram_tiles.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: info.as_entire_binding(),
+                        },
+                    ],
+                });
+                dispatch(
+                    &mut encoder,
+                    &self.histogram_pipeline,
+                    &histogram_bind,
+                    width,
+                    height,
+                );
+                t.tiles[index] = keys;
+            }
+        }
+        if changed > 0 {
+            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Histogram reduction"),
+                layout: &self.histogram_reduce.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: t.histogram_tiles.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: t.histogram.as_entire_binding(),
+                    },
+                ],
+            });
+            dispatch(&mut encoder, &self.histogram_reduce, &bind, 256, 4);
+            self.queue.submit([encoder.finish()]);
+            self.renders += 1;
+            self.tiles_rendered += changed;
+        }
+        self.render_valid = true;
+        Ok(resized)
     }
     pub fn display_view(&self) -> Option<&wgpu::TextureView> {
         self.targets.as_ref().map(|t| &t.display.view)
     }
     pub fn readback(&self) -> Result<Readback> {
+        ensure!(!self.compare, "Switch to edited pixels before exporting");
         ensure!(
             self.render_valid,
             "The current image could not be rendered; refusing to export stale pixels"
@@ -481,10 +567,11 @@ impl Engine {
             self.render_valid,
             "Render an image before reading its histogram"
         );
-        let buffer = self
-            .histogram_buffer
+        let buffer = &self
+            .targets
             .as_ref()
-            .context("No histogram has been computed yet")?;
+            .context("No histogram has been computed yet")?
+            .histogram;
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Tone histogram readback"),
             size: 1024 * 4,
@@ -500,9 +587,54 @@ impl Engine {
             submission,
         })
     }
-    /// True when a render has completed and its outputs are current.
-    pub fn render_valid(&self) -> bool {
-        self.render_valid
+}
+fn dispatch(
+    encoder: &mut wgpu::CommandEncoder,
+    pipeline: &wgpu::ComputePipeline,
+    bind: &wgpu::BindGroup,
+    width: u32,
+    height: u32,
+) {
+    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("Photo operation"),
+        timestamp_writes: None,
+    });
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, bind, &[]);
+    pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
+}
+
+pub struct Readback {
+    device: wgpu::Device,
+    buffer: wgpu::Buffer,
+    submission: wgpu::SubmissionIndex,
+    pub width: u32,
+    pub height: u32,
+    stride: u32,
+}
+impl Readback {
+    // Call from an IO worker or test, never from the interactive UI thread.
+    pub fn finish(self) -> Result<Vec<u8>> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = tx.send(result);
+            });
+        self.device.poll(wgpu::PollType::Wait {
+            submission_index: Some(self.submission),
+            timeout: Some(Duration::from_secs(30)),
+        })?;
+        rx.recv_timeout(Duration::from_secs(30))
+            .context("GPU export timed out")??;
+        let mapped = self.buffer.slice(..).get_mapped_range();
+        let mut pixels = Vec::with_capacity((self.width * self.height * 4) as usize);
+        for row in mapped.chunks_exact(self.stride as usize) {
+            pixels.extend_from_slice(&row[..self.width as usize * 4]);
+        }
+        drop(mapped);
+        self.buffer.unmap();
+        Ok(pixels)
     }
 }
 
@@ -554,54 +686,5 @@ impl HistogramReadback {
         drop(mapped);
         self.buffer.unmap();
         Ok(rows)
-    }
-}
-fn dispatch(
-    encoder: &mut wgpu::CommandEncoder,
-    pipeline: &wgpu::ComputePipeline,
-    bind: &wgpu::BindGroup,
-    width: u32,
-    height: u32,
-) {
-    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some("Photo operation"),
-        timestamp_writes: None,
-    });
-    pass.set_pipeline(pipeline);
-    pass.set_bind_group(0, bind, &[]);
-    pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
-}
-
-pub struct Readback {
-    device: wgpu::Device,
-    buffer: wgpu::Buffer,
-    submission: wgpu::SubmissionIndex,
-    pub width: u32,
-    pub height: u32,
-    stride: u32,
-}
-impl Readback {
-    // Call from an IO worker or test, never from the interactive UI thread.
-    pub fn finish(self) -> Result<Vec<u8>> {
-        let (tx, rx) = mpsc::sync_channel(1);
-        self.buffer
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, move |result| {
-                let _ = tx.send(result);
-            });
-        self.device.poll(wgpu::PollType::Wait {
-            submission_index: Some(self.submission),
-            timeout: Some(Duration::from_secs(30)),
-        })?;
-        rx.recv_timeout(Duration::from_secs(30))
-            .context("GPU export timed out")??;
-        let mapped = self.buffer.slice(..).get_mapped_range();
-        let mut pixels = Vec::with_capacity((self.width * self.height * 4) as usize);
-        for row in mapped.chunks_exact(self.stride as usize) {
-            pixels.extend_from_slice(&row[..self.width as usize * 4]);
-        }
-        drop(mapped);
-        self.buffer.unmap();
-        Ok(pixels)
     }
 }

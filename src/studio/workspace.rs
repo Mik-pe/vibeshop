@@ -30,7 +30,8 @@ impl Studio {
                                     egui::Button::new(
                                         RichText::new(format!("{} New canvas…", icons::NEW_CANVAS))
                                             .color(TEXT),
-                                    ),
+                                    )
+                                    .shortcut_text("Ctrl/Cmd+N"),
                                 )
                                 .clicked()
                             {
@@ -234,7 +235,7 @@ impl Studio {
         let saturation = ui.label(icons::glyph(icons::SATURATION, 15.0).color(TEXT_MUTED));
         control(ui, "Saturation", &mut layer.saturation, 0.0..=2.0, "×").labelled_by(saturation.id);
         ui.add_space(8.0);
-        self.tone_panel(ui);
+        self.tone_panel(ui, &mut layer);
         ui.add_space(8.0);
         if ui.small_button("Reset color adjustments").clicked() {
             layer.reset_adjustments();
@@ -572,7 +573,7 @@ fn section(ui: &mut egui::Ui, text: &str) {
 /// Master levels, per-channel curves with a draggable editor, the GPU
 /// histogram of the final composition, and a before/after compare toggle.
 impl Studio {
-    fn tone_panel(&mut self, ui: &mut egui::Ui) {
+    fn tone_panel(&mut self, ui: &mut egui::Ui, layer: &mut document::Layer) {
         section(ui, "CURVES");
         ui.add_space(6.0);
         // Channel picker as a selectable row of named tabs.
@@ -588,76 +589,136 @@ impl Studio {
                     .clicked()
                 {
                     self.curve_channel = index;
-                    self.curve_handle = None;
+                    self.curve_handle = Some(16);
                 }
             }
         });
         ui.add_space(4.0);
-        let selected = self.editor.selected;
-        let Some(original) = self.editor.document.layers.get(selected).cloned() else {
-            return;
-        };
-        let mut layer = original.clone();
         let curve = &mut layer.curves[self.curve_channel];
-        // The editor mutates the layer copy; commit happens below.
         let response = self.curve_editor(ui, curve);
-        // Keyboard editing of the active handle: arrows move in 1/255 steps,
-        // Shift = 10x, Delete removes the point, Escape drops the handle.
-        if let Some(handle) = self.curve_handle {
-            if response.has_focus() {
-                let step = ui.input(|input| {
-                    let modifier = if input.modifiers.shift {
-                        10.0 / 255.0
-                    } else {
-                        1.0 / 255.0
-                    };
-                    let vertical = input.key_pressed(egui::Key::ArrowUp) as i8
-                        - input.key_pressed(egui::Key::ArrowDown) as i8;
-                    let horizontal = input.key_pressed(egui::Key::ArrowRight) as i8
-                        - input.key_pressed(egui::Key::ArrowLeft) as i8;
-                    (vertical, horizontal, modifier)
-                });
-                let (vertical, horizontal, modifier) = step;
-                if vertical != 0 || horizontal != 0 {
-                    let x = (handle as f32 / 32.0 + horizontal as f32 / 255.0).clamp(0.0, 1.0);
-                    let _ = curve.set(handle, curve.eval(handle as f32 / 32.0)); // keep value
-                    let value = curve.get(handle).unwrap_or_default() + vertical as f32 * modifier;
-                    if let Some(index) = grid_index(x) {
-                        let _ = curve.set(index, value.clamp(0.0, 1.0));
-                    }
-                    self.editor.changed();
+        if response.has_focus() {
+            ui.memory_mut(|memory| {
+                memory.set_focus_lock_filter(
+                    response.id,
+                    egui::EventFilter {
+                        horizontal_arrows: true,
+                        vertical_arrows: true,
+                        escape: true,
+                        ..Default::default()
+                    },
+                )
+            });
+            if ui.input(|i| {
+                [
+                    egui::Key::ArrowLeft,
+                    egui::Key::ArrowRight,
+                    egui::Key::ArrowUp,
+                    egui::Key::ArrowDown,
+                ]
+                .iter()
+                .any(|key| i.key_pressed(*key))
+            }) {
+                // The first key after focus can precede egui installing its filter.
+                ui.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+            }
+            let mut handle = self.curve_handle.unwrap_or(16);
+            ui.input_mut(|input| {
+                if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft) {
+                    handle = handle.saturating_sub(1);
                 }
-                if ui.input(|input| input.key_pressed(egui::Key::Delete)) {
+                if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight) {
+                    handle = (handle + 1).min(32);
+                }
+                let step = if input.modifiers.shift {
+                    10.0 / 255.0
+                } else {
+                    1.0 / 255.0
+                };
+                let modifiers = input.modifiers;
+                let up = input.consume_key(modifiers, egui::Key::ArrowUp);
+                let down = input.consume_key(modifiers, egui::Key::ArrowDown);
+                if up || down {
+                    let _ = curve.set(
+                        handle,
+                        curve.eval(handle as f32 / 32.0)
+                            + (i32::from(up) - i32::from(down)) as f32 * step,
+                    );
+                }
+                if input.consume_key(egui::Modifiers::NONE, egui::Key::Delete) {
                     let _ = curve.reset_point(handle);
-                    self.curve_handle = None;
-                    self.editor.changed();
                 }
+            });
+            self.curve_handle = Some(handle);
+        }
+        ui.label(
+            RichText::new("←/→ select · ↑/↓ output · Delete release")
+                .size(10.0)
+                .color(MUTED),
+        );
+        ui.label(
+            RichText::new("Drag a point · Esc cancels drag")
+                .size(10.0)
+                .color(MUTED),
+        );
+        ui.horizontal(|ui| {
+            let mut handle = self.curve_handle.unwrap_or(16);
+            let input_label = ui.label("Input step");
+            ui.add(egui::DragValue::new(&mut handle).range(0..=32))
+                .labelled_by(input_label.id);
+            self.curve_handle = Some(handle);
+            let mut value = curve.eval(handle as f32 / 32.0);
+            let output_label = ui.label("Output");
+            if ui
+                .add(
+                    egui::DragValue::new(&mut value)
+                        .range(0.0..=1.0)
+                        .speed(0.001)
+                        .fixed_decimals(3),
+                )
+                .labelled_by(output_label.id)
+                .changed()
+            {
+                let _ = curve.set(handle, value);
             }
-            if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
-                self.curve_handle = None;
-            }
+        });
+        if ui.small_button("Reset channel curve").clicked() {
+            curve.reset();
         }
         ui.add_space(6.0);
         let levels = &mut layer.levels;
-        control(ui, "Black point", &mut levels.black, 0.0..=0.49, "");
+        control(
+            ui,
+            "Black point",
+            &mut levels.black,
+            0.0..=(levels.white - 0.01).max(0.0),
+            "",
+        );
         control(ui, "Gamma", &mut levels.gamma, 0.2..=5.0, "");
-        control(ui, "White point", &mut levels.white, 0.51..=1.0, "");
+        control(
+            ui,
+            "White point",
+            &mut levels.white,
+            (levels.black + 0.01).min(1.0)..=1.0,
+            "",
+        );
         ui.add_space(6.0);
         // Histogram of the final composition, computed on the GPU. The area
         // is reserved at full height whether or not data has arrived, so the
         // first readback never shifts the layout (a scrollbar appearing here
         // would resize the canvas mid-session).
         ui.label(
-            RichText::new("HISTOGRAM · final pixels")
+            RichText::new("HISTOGRAM · linear composite")
                 .size(10.0)
                 .color(MUTED),
         );
         ui.add_space(4.0);
         let (rect, _) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), 110.0), Sense::hover());
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 138.0), Sense::hover());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 2.0, Color32::from_black_alpha(60));
-        if let Some(rows) = &self.histogram_rows {
+        if let Some(rows) = &self.histogram_rows
+            && self.histogram_revision == self.gpu.renders
+        {
             let peak = rows[0].iter().copied().max().unwrap_or(1).max(1) as f32;
             let luma = Rect::from_min_max(rect.min, egui::pos2(rect.right(), rect.top() + 56.0));
             let bar = luma.width() / 256.0;
@@ -704,30 +765,39 @@ impl Studio {
                 MUTED,
             );
         }
+        ui.label(
+            RichText::new("Transparent pixels excluded · before sRGB encoding")
+                .size(10.0)
+                .color(MUTED),
+        );
+        let endpoints = self
+            .histogram_rows
+            .as_ref()
+            .filter(|_| self.histogram_revision == self.gpu.renders)
+            .map(|rows| format!("Luma end bins: {} / {}", rows[0][0], rows[0][255]))
+            .unwrap_or_else(|| "Luma end bins: measuring…".into());
+        ui.label(RichText::new(endpoints).size(10.0)).on_hover_text("Counts in bins 0 and 255; these include endpoint values and do not prove clipping before tone adjustments.");
         ui.add_space(6.0);
-        // Before/after: hold to see unadjusted pixels. Render-time bypass;
+        // Before/after toggles a render-time bypass;
         // the document is untouched and no history entry is created.
         let compare = ui
             .add(
                 egui::Button::new(
                     RichText::new(if self.compare {
-                        "⬉ After"
+                        "Show edited"
                     } else {
-                        "⬉ Before"
+                        "Show before"
                     })
                     .size(12.0),
                 )
                 .selected(self.compare),
             )
-            .on_hover_text("Hold to compare against the unadjusted image");
+            .on_hover_text(
+                "Toggle all tonal adjustments for preview. Export always uses edited pixels.",
+            );
         if compare.clicked() {
             self.compare = !self.compare;
             self.gpu.set_compare(self.compare);
-        }
-        if layer != original {
-            self.editor.begin_edit();
-            self.editor.document.layers[selected] = layer;
-            self.editor.changed();
         }
     }
 
@@ -786,46 +856,43 @@ impl Studio {
             };
             painter.circle_filled(at, if active || defined { 4.0 } else { 2.0 }, color);
         }
-        // Pointer interaction: press grabs the nearest point on the curve.
         if response.drag_started() {
-            eprintln!(
-                "[curve] START interact={:?} dragged={}",
-                response.interact_pointer_pos().map(|p| (p.x, p.y)),
-                response.dragged()
-            );
+            response.request_focus();
+            self.curve_drag = Some(curve.clone());
+            self.curve_cancelled = false;
+            if let Some(pointer) = response.interact_pointer_pos() {
+                self.curve_handle = grid_index((pointer.x - rect.left()) / rect.width());
+            }
         }
-        if response.drag_started()
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) && self.curve_drag.is_some() {
+            *curve = self.curve_drag.take().unwrap();
+            self.curve_cancelled = true;
+        }
+        if (response.dragged() || response.clicked())
+            && !self.curve_cancelled
             && let Some(pointer) = response.interact_pointer_pos()
         {
-            let tx = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-            let index = grid_index(tx).unwrap_or(0);
+            response.request_focus();
+            let index =
+                grid_index(((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0)).unwrap();
+            let value = (1.0 - (pointer.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
+            if response.dragged()
+                && let Some(old) = self.curve_handle
+                && old != index
+            {
+                let _ = curve.reset_point(old);
+            }
+            let _ = curve.set(index, value);
             self.curve_handle = Some(index);
         }
-        if response.dragged()
-            && let Some(pointer) = response.interact_pointer_pos()
-        {
-            let x = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-            let y = 1.0 - ((pointer.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
-            if let Some(index) = grid_index(x) {
-                let _ = curve.set(index, y);
-                self.curve_handle = Some(index);
-            }
-        }
-        if response.drag_stopped() {
-            self.curve_handle = self.curve_handle.take();
-        }
-        // Double-click releases a point back to the interpolated path.
         if response.double_clicked()
-            && let Some(pointer) = response.interact_pointer_pos()
+            && let Some(index) = self.curve_handle
         {
-            let tx = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-            if let Some(index) = grid_index(tx) {
-                let _ = curve.reset_point(index);
-                self.curve_handle = None;
-            }
+            let _ = curve.reset_point(index);
         }
-        if response.changed() {
-            self.editor.changed();
+        if !ui.input(|i| i.pointer.any_down()) {
+            self.curve_drag = None;
+            self.curve_cancelled = false;
         }
         response
     }

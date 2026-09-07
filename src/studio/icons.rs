@@ -29,7 +29,7 @@ pub(super) const NEW_CANVAS: char = '🖼';
 
 const ALL: &[char] = &[
     TOOL_MOVE, TOOL_PAN, OPEN, SAVE, EXPORT, UNDO, REDO, DUPLICATE, REMOVE, RAISE, LOWER, VISIBLE,
-    HIDDEN, EXPOSURE, CONTRAST, OPACITY, SATURATION, FIT,
+    HIDDEN, EXPOSURE, CONTRAST, OPACITY, SATURATION, FIT, NEW_CANVAS,
 ];
 
 /// Text color matched to the current visuals. Emoji fonts do not inherit

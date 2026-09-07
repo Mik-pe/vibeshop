@@ -51,12 +51,14 @@ pub struct Studio {
     curve_channel: usize,
     /// Index of the curve control point being edited, if any.
     curve_handle: Option<usize>,
+    curve_drag: Option<vibeshop::curves::Curve>,
+    curve_cancelled: bool,
     /// Histogram readback job: polls for completion without blocking.
-    histogram: Option<Receiver<Result<vibeshop::gpu::HistogramData>>>,
+    histogram: Option<(u64, Receiver<Result<vibeshop::gpu::HistogramData>>)>,
     histogram_rows: Option<vibeshop::gpu::HistogramData>,
     /// Document revision the displayed histogram describes.
     histogram_revision: u64,
-    /// True while the user holds the before/after compare button.
+    /// Preview unadjusted tones; exported pixels always use document adjustments.
     compare: bool,
 }
 impl Studio {
@@ -102,7 +104,9 @@ impl Studio {
             startup,
             icons_checked: false,
             curve_channel: 0,
-            curve_handle: None,
+            curve_handle: Some(16),
+            curve_drag: None,
+            curve_cancelled: false,
             histogram: None,
             histogram_rows: None,
             histogram_revision: 0,
@@ -110,7 +114,7 @@ impl Studio {
         }
     }
     fn render(&mut self) -> bool {
-        if self.rendered_revision == self.editor.revision {
+        if self.rendered_revision == self.editor.revision && self.gpu.render_valid() {
             return self.render_valid;
         }
         self.render_valid = false;
@@ -343,7 +347,7 @@ impl Studio {
         self.status_bar(ctx);
         self.inspector(ctx);
         self.canvas(ctx);
-        self.poll_histogram();
+        self.poll_histogram(ctx);
         if !ctx.input(|i| i.pointer.any_down()) {
             self.editor.finish_edit();
         }
@@ -386,30 +390,37 @@ fn zoom_pan(pan: Vec2, anchor: Vec2, ratio: f32) -> Vec2 {
     anchor - (anchor - pan) * ratio
 }
 impl Studio {
-    /// Collect the histogram computed by the last render without blocking.
-    /// One readback job in flight; revision-tagged so stale data is dropped.
-    fn poll_histogram(&mut self) {
-        if let Some(job) = &self.histogram {
+    /// One in-flight copy, tagged with the GPU render generation. A completed
+    /// older snapshot must never be labeled as the latest image.
+    fn poll_histogram(&mut self, ctx: &egui::Context) {
+        if let Some((generation, job)) = &self.histogram {
             match job.try_recv() {
                 Ok(Ok(rows)) => {
-                    self.histogram_rows = Some(rows);
-                    self.histogram_revision = self.editor.revision;
+                    if *generation == self.gpu.renders && self.gpu.render_valid() {
+                        self.histogram_rows = Some(rows);
+                        self.histogram_revision = *generation;
+                    }
                     self.histogram = None;
                 }
                 Ok(Err(_)) | Err(TryRecvError::Disconnected) => {
                     self.histogram = None;
                 }
-                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Empty) => {
+                    return;
+                }
             }
-            return;
         }
-        // The displayed histogram describes an older revision: read back the
-        // newest composition. One 4 KiB copy, never a full-image readback.
         if self.gpu.render_valid()
-            && self.histogram_revision != self.editor.revision
+            && self.histogram_revision != self.gpu.renders
             && let Ok(readback) = self.gpu.histogram()
         {
-            self.histogram = Some(readback.spawn());
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(readback.finish());
+                ctx.request_repaint();
+            });
+            self.histogram = Some((self.gpu.renders, rx));
         }
     }
 }

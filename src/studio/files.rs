@@ -121,6 +121,10 @@ impl Studio {
     }
 
     pub(super) fn export(&mut self, ctx: &egui::Context) {
+        if self.compare {
+            self.compare = false;
+            self.gpu.set_compare(false);
+        }
         if self.job.is_some()
             || self.pending.is_some()
             || self.error.is_some()

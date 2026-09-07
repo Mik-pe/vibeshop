@@ -2,9 +2,9 @@
 //!
 //! A layer's curve adjustment is a monotone 0..=1 → 0..=1 map, stored as
 //! 33 control values on a uniform grid (every 1/32 of the input range).
-//! The GPU turns the control points into a 256-entry LUT with Catmull-Rom
-//! interpolation and applies it in linear light; [`Curve::eval`] mirrors
-//! that interpolation exactly for UI drawing, tests and project fixtures.
+//! The GPU samples a 256-entry LUT with linear
+//! interpolation and applies it in linear light. [`Curve::eval`] is the
+//! piecewise-linear reference; LUT sampling approximates it near control knots.
 
 use anyhow::{Result, ensure};
 
@@ -81,7 +81,11 @@ impl Curve {
             index
         );
         ensure!(value.is_finite(), "Curve control value must be finite");
-        let value = value.clamp(0.0, 1.0);
+        let low = (0..index).rev().find_map(|i| self.get(i)).unwrap_or(0.0);
+        let high = (index + 1..CURVE_POINTS)
+            .find_map(|i| self.get(i))
+            .unwrap_or(1.0);
+        let value = value.clamp(low, high);
         // Normalize -0.0 so bitwise equality sees one zero.
         self.points[index] = if value == 0.0 { 0.0 } else { value };
         Ok(())
@@ -107,56 +111,40 @@ impl Curve {
         self.points.iter().all(|v| !v.is_finite())
     }
 
-    /// The exact value the GPU evaluator applies at `x` in 0..=1: Catmull-Rom
-    /// interpolation through the defined control points, clamped to 0..=1.
-    /// Untouched points are interpolated past, not treated as zero.
+    /// Piecewise-linear interpolation between defined points, with implicit
+    /// (0, 0) and (1, 1) endpoints. Ordered points cannot overshoot.
     pub fn eval(&self, x: f32) -> f32 {
-        if self.is_neutral() {
-            return x;
-        }
         let x = x.clamp(0.0, 1.0);
         let t = x * (CURVE_POINTS - 1) as f32;
-        let i = ((t as usize).min(CURVE_POINTS - 2)) as isize;
-        let f = t - i as f32;
-        let value = |index: isize| -> f32 {
-            let index = index.clamp(0, CURVE_POINTS as isize - 1);
-            match self.get(index as usize) {
-                Some(v) => v,
-                // Interpolate past untouched points from the nearest defined
-                // neighbors, falling back to the anchored identity.
-                None => {
-                    let before = (0..=index)
-                        .rev()
-                        .find_map(|k| self.get(k as usize))
-                        .unwrap_or(0.0);
-                    let after = (index + 1..CURVE_POINTS as isize)
-                        .find_map(|k| self.get(k as usize))
-                        .unwrap_or(1.0);
-                    before
-                        + (after - before)
-                            * ((index as f32 - self.last_defined_before(index)) / 1.0)
-                                .clamp(0.0, 1.0)
+        let mut previous = (0.0, self.get(0).unwrap_or(0.0));
+        for index in 1..CURVE_POINTS {
+            if let Some(value) = self
+                .get(index)
+                .or_else(|| (index == CURVE_POINTS - 1).then_some(1.0))
+            {
+                if t <= index as f32 {
+                    let fraction = (t - previous.0) / (index as f32 - previous.0);
+                    return previous.1 + (value - previous.1) * fraction;
                 }
+                previous = (index as f32, value);
             }
-        };
-        let p1 = value(i);
-        let p2 = value(i + 1);
-        let p0 = value(i - 1);
-        let p3 = value(i + 2);
-        // Catmull-Rom with the tangent scaled to the unit grid step.
-        let v = 0.5
-            * ((2.0 * p1)
-                + (-p0 + p2) * f
-                + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * f * f
-                + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * f * f * f);
-        v.clamp(0.0, 1.0)
+        }
+        previous.1
     }
 
-    fn last_defined_before(&self, index: isize) -> f32 {
-        (0..=index)
-            .rev()
-            .find_map(|k| self.get(k as usize).map(|_| k as f32))
-            .unwrap_or(-1.0)
+    pub(crate) fn validate(&self) -> Result<()> {
+        let mut previous = 0.0;
+        for value in self.points {
+            if value.is_nan() {
+                continue;
+            }
+            ensure!(
+                value.is_finite() && (previous..=1.0).contains(&value),
+                "Curve points must be finite, bounded and monotone"
+            );
+            previous = value;
+        }
+        Ok(())
     }
 }
 
@@ -165,7 +153,7 @@ impl Curve {
 pub struct Levels {
     /// Input value mapped to output 0. 0.0..=0.99, strictly below white.
     pub black: f32,
-    /// Midtone exponent; 1.0 is neutral, > 1 darkens, < 1 lightens.
+    /// Midtone exponent; 1.0 is neutral, > 1 lightens, < 1 darkens.
     pub gamma: f32,
     /// Input value mapped to output 1. 0.01..=1.0, strictly above black.
     pub white: f32,
@@ -215,6 +203,25 @@ pub(crate) fn levels_uniform(levels: &Levels) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sparse_points_interpolate_without_steps_and_clamp_to_neighbors() {
+        let mut curve = Curve::default();
+        curve.set(16, 0.25).unwrap();
+        assert_eq!(curve.eval(0.0), 0.0);
+        assert_eq!(curve.eval(0.25), 0.125);
+        assert_eq!(curve.eval(0.5), 0.25);
+        assert_eq!(curve.eval(0.75), 0.625);
+        assert_eq!(curve.eval(1.0), 1.0);
+        curve.set(8, 0.9).unwrap();
+        assert_eq!(curve.get(8), Some(0.25));
+        let mut previous = 0.0;
+        for x in 0..=1024 {
+            let value = curve.eval(x as f32 / 1024.0);
+            assert!(value >= previous);
+            previous = value;
+        }
+    }
 
     #[test]
     fn neutral_curve_is_identity() {

@@ -100,6 +100,13 @@ fn malformed_headers_assets_and_layers_are_rejected() {
         (opacity + 32, f32::INFINITY.to_le_bytes().to_vec()),
         // Curve control value outside 0..=1 (RGB curve, first point).
         (opacity + 36, 1.5_f32.to_le_bytes().to_vec()),
+        (opacity + 36, f32::INFINITY.to_le_bytes().to_vec()),
+        (opacity + 28, (-1.0_f32).to_le_bytes().to_vec()),
+        (opacity + 24, 1.0_f32.to_le_bytes().to_vec()),
+        (
+            opacity + 36,
+            [0.8_f32.to_le_bytes(), 0.2_f32.to_le_bytes()].concat(),
+        ),
     ];
     for (offset, replacement) in cases {
         let mut bad = bytes.clone();
@@ -209,4 +216,34 @@ fn replacement_has_a_new_state_identity_and_new_canvas_is_unsaved() {
     assert!(editor.dirty);
     editor.mark_saved(editor.state_id());
     assert!(!editor.dirty);
+}
+
+#[test]
+fn nonneutral_tone_round_trip_and_legacy_v1_defaults() {
+    use vibeshop::curves::Levels;
+    let mut document = Document::new(Layer::new(
+        "tone",
+        Source::new(1, 1, vec![80, 90, 100, 255]).unwrap(),
+    ));
+    document.layers[0].levels = Levels {
+        black: 0.1,
+        gamma: 1.5,
+        white: 0.9,
+    };
+    document.layers[0].curves[2].set(16, 0.3).unwrap();
+    let mut bytes = Vec::new();
+    project::write_to(&mut bytes, &document).unwrap();
+    let reopened = project::read_from(&mut Cursor::new(&bytes)).unwrap();
+    assert_eq!(reopened.layers[0].levels, document.layers[0].levels);
+    assert_eq!(reopened.layers[0].curves, document.layers[0].curves);
+    bytes.truncate(bytes.len() - (3 + 4 * 33) * 4);
+    bytes[8..12].copy_from_slice(&1_u32.to_le_bytes());
+    let legacy = project::read_from(&mut Cursor::new(bytes)).unwrap();
+    assert_eq!(legacy.layers[0].levels, Levels::default());
+    assert!(
+        legacy.layers[0]
+            .curves
+            .iter()
+            .all(|curve| curve.is_neutral())
+    );
 }

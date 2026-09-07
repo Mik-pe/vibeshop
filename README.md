@@ -22,13 +22,15 @@ A working Vulkan, Metal, or DirectX 12 adapter is required. Linux file dialogs u
 
 ## Edit and keep your work
 
-Open PNG/JPEG, drop an image or .vibe project onto the canvas, or create a transparent canvas from File → New canvas. Add, duplicate, delete, reorder, hide, move and blend raster layers. Adjust exposure, contrast, saturation and opacity without modifying source pixels. Pan and cursor-anchored zoom reuse the rendered GPU image. Undo/redo coalesces a drag into one edit.
+Open PNG/JPEG, drop an image or .vibe project onto the canvas, or create a transparent canvas from File → New canvas. Add, duplicate, delete, reorder, hide, move and blend raster layers. Adjust exposure, contrast, saturation, levels, per-channel curves and opacity without modifying source pixels. Pan and cursor-anchored zoom reuse the rendered GPU image. Undo/redo coalesces a drag into one edit.
 
 **Save project** writes a self-contained `.vibe` file that preserves source pixels, shared assets, layer settings and canvas dimensions. Reopen it to continue editing. **Export PNG** writes a flattened copy and does not mark the project saved. Closing or replacing an edited document offers save/discard/cancel. A failed save leaves the previous file intact; edits made while saving remain unsaved. Save regularly: automatic crash recovery is not implemented.
 
+The Curves panel edits monotone linear-light tone maps. Left/right arrows select one of 33 input steps; up/down change its output (Shift for larger steps), Delete releases it, and exact output values can be typed. Dragging moves one point; Escape cancels an active drag. Reset channel curve resets that channel. Levels map input black/white to output 0/1; gamma above 1 lightens. Show before toggles all tone adjustments for preview; export always writes edited pixels. The histogram counts nontransparent pixels in the final linear composition before sRGB encoding. Its endpoint-bin counts do not prove pre-adjustment clipping.
+
 `Ctrl/Cmd+N` creates a canvas. `Ctrl/Cmd+O` opens a project or image; `Ctrl/Cmd+Shift+O` adds an image layer. `Ctrl/Cmd+S` saves the project, `Ctrl/Cmd+Shift+S` saves as, and `Ctrl/Cmd+Shift+E` exports PNG. `Ctrl/Cmd+Z` undoes and `Ctrl/Cmd+Shift+Z` redoes. `H` selects pan, `V` moves the selected layer, and Space temporarily pans. Scroll zooms; `F` or double-click fits the image. Click the zoom percentage for 100% physical-pixel display.
 
-**This is an early editor, not Photoshop parity.** Masks, brushes, crop/rotation, PSD, RAW, ICC color management, automatic recovery and a browser build are not implemented. Tagged ICC images are rejected. Input is reduced to RGBA8 and interpreted as sRGB. Limits are 16 megapixels, 8192px per side, 16 layers and 128 MiB of distinct retained source pixels. Project version 1 stores raw assets rather than compressed archives. Keep original files and read [the architecture](docs/ARCHITECTURE.md) and [project format](docs/PROJECT_FORMAT.md).
+**This is an early editor, not Photoshop parity.** Masks, brushes, crop/rotation, PSD, RAW, ICC color management, automatic recovery and a browser build are not implemented. Tagged ICC images are rejected. Input is reduced to RGBA8 and interpreted as sRGB. Limits are 16 megapixels, 8192px per side, 16 layers and 128 MiB of distinct retained source pixels. Project version 2 stores raw assets rather than compressed archives. Keep original files and read [the architecture](docs/ARCHITECTURE.md) and [project format](docs/PROJECT_FORMAT.md).
 
 ## Verify
 

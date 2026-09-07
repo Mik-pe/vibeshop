@@ -235,13 +235,6 @@ impl Harness {
             repeat: false,
             modifiers,
         }]);
-        self.frame(vec![Event::Key {
-            key: egui::Key::F,
-            physical_key: Some(egui::Key::F),
-            pressed: false,
-            repeat: false,
-            modifiers: Modifiers::NONE,
-        }]);
     }
     fn drag(&mut self, start: Pos2, end: Pos2) {
         self.frame(vec![Event::PointerMoved(start)]);
@@ -270,7 +263,7 @@ impl Harness {
         }
         assert!(self.app.error.is_none(), "{:?}", self.app.error);
     }
-    fn capture(&self, name: &str) {
+    fn capture(&self, name: &str) -> Vec<u8> {
         let width = self.target.width();
         let height = self.target.height();
         let stride = (width * 4).div_ceil(256) * 256;
@@ -332,6 +325,7 @@ impl Harness {
         .unwrap();
         drop(data);
         buffer.unmap();
+        pixels
     }
 }
 
@@ -532,14 +526,55 @@ fn keyboard_focus_and_activation_work_like_assistive_technology() {
         "Space on the focused visibility checkbox must hide the layer"
     );
     // Enter activates a focused button command.
+    let fitted_zoom = h.app.zoom;
+    h.app.fit = false;
+    h.app.zoom = fitted_zoom * 2.0;
+    h.app.pan = egui::vec2(40.0, 30.0);
     h.focus(&fit);
     h.frame(Vec::new());
+    assert!(!h.app.fit);
+    assert_eq!(h.app.zoom, fitted_zoom * 2.0);
+    assert_eq!(h.app.pan, egui::vec2(40.0, 30.0));
     h.press(egui::Key::Enter);
     h.frame(Vec::new());
     assert!(
         h.app.fit,
         "Enter on the focused Fit button must fit the canvas"
     );
+    assert_eq!(h.app.zoom, fitted_zoom);
+    assert_eq!(h.app.pan, egui::Vec2::ZERO);
+}
+
+#[test]
+fn modal_dialogs_block_shortcuts_from_behind() {
+    let mut h = Harness::new([1000, 640], 1.0);
+    h.click(&format!("{} Duplicate", icons::DUPLICATE));
+    assert_eq!(h.app.editor.document.layers.len(), 2);
+    let before = h.app.editor.document.clone();
+    h.key(egui::Key::N, Modifiers::COMMAND);
+    h.frame(Vec::new());
+    assert!(h.app.new_size.is_some());
+    h.click("Create canvas");
+    assert!(h.app.pending.is_some());
+    let blocked_before = h.app.editor.document.clone();
+    h.key(egui::Key::Z, Modifiers::COMMAND);
+    h.key(egui::Key::O, Modifiers::COMMAND);
+    h.frame(Vec::new());
+    assert!(h.app.job.is_none(), "no file job may start behind a modal");
+    assert!(
+        h.app.editor.document == blocked_before,
+        "document must not change while the unsaved-work modal is up"
+    );
+    h.key(egui::Key::Escape, Modifiers::NONE);
+    h.frame(Vec::new());
+    assert!(h.app.pending.is_none());
+    h.frame(Vec::new());
+    h.key(egui::Key::Z, Modifiers::COMMAND);
+    assert_ne!(
+        h.app.editor.document, before,
+        "after dismissal, undo must work again"
+    );
+    assert_eq!(h.app.editor.document.layers.len(), 1);
 }
 
 #[test]
@@ -600,40 +635,106 @@ fn curve_editor_drags_bend_pixels_and_histogram_follows() {
     );
     for _ in 0..30 {
         h.frame(Vec::new());
-        if h.app.histogram_revision == h.app.editor.revision && h.app.histogram.is_none() {
+        if h.app.histogram_revision == h.app.gpu.renders && h.app.histogram.is_none() {
             break;
         }
     }
 }
 
 #[test]
-fn modal_dialogs_block_shortcuts_from_behind() {
-    let mut h = Harness::new([1000, 640], 1.0);
-    h.click(&format!("{} Duplicate", icons::DUPLICATE));
-    assert_eq!(h.app.editor.document.layers.len(), 2);
-    let before = h.app.editor.document.clone();
-    h.key(egui::Key::N, Modifiers::COMMAND);
+fn tone_keyboard_drag_cancellation_and_compare_are_real_controls() {
+    for scale in [1.0, 1.5] {
+        let mut h = Harness::new([1000, 1100], scale);
+        let name = "Tone curve editor, RGB";
+        h.focus(name);
+        h.key(egui::Key::ArrowUp, Modifiers::NONE);
+        assert!(h.app.editor.document.layers[0].curves[0].get(16).is_some());
+        h.key(egui::Key::ArrowRight, Modifiers::NONE);
+        assert_eq!(h.app.curve_handle, Some(17));
+        h.key(egui::Key::ArrowUp, Modifiers::SHIFT);
+        assert!(h.app.editor.document.layers[0].curves[0].get(17).is_some());
+        h.key(egui::Key::Delete, Modifiers::NONE);
+        assert!(h.app.editor.document.layers[0].curves[0].get(17).is_none());
+        h.key(egui::Key::Z, Modifiers::COMMAND);
+        assert!(h.app.editor.document.layers[0].curves[0].get(17).is_some());
+        h.key(egui::Key::Z, Modifiers::COMMAND | Modifiers::SHIFT);
+        assert!(h.app.editor.document.layers[0].curves[0].get(17).is_none());
+        let original = h.app.editor.document.clone();
+        let state = h.app.editor.state_id();
+        let rect = h.rect(name);
+        let start = rect.center();
+        let end = start + egui::vec2(25.0, 20.0);
+        h.frame(vec![
+            Event::PointerMoved(start),
+            Event::PointerButton {
+                pos: start,
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            },
+        ]);
+        h.frame(vec![Event::PointerMoved(end)]);
+        assert_ne!(h.app.editor.document, original);
+        h.key(egui::Key::Escape, Modifiers::NONE);
+        h.frame(vec![Event::PointerButton {
+            pos: end,
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        }]);
+        assert_eq!(h.app.editor.document, original);
+        assert_eq!(h.app.editor.state_id(), state);
+        h.app.editor.edit(|doc, _| {
+            doc.layers[0].exposure = -1.0;
+            doc.layers[0].levels.gamma = 1.4;
+        });
+        h.frame(vec![Event::PointerMoved(egui::pos2(850.0, 300.0))]);
+        for _ in 0..12 {
+            h.frame(vec![Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -120.0),
+                modifiers: Modifiers::NONE,
+            }]);
+        }
+        h.frame(Vec::new());
+        let doc = h.app.editor.document.clone();
+        let state = h.app.editor.state_id();
+        let edited = h.capture(&format!("tone-edited-{scale}"));
+        h.click("Show before");
+        let before = h.capture(&format!("tone-before-{scale}"));
+        let pixel =
+            ((400.0 * scale) as usize * h.target.width() as usize + (200.0 * scale) as usize) * 4;
+        assert_ne!(&edited[pixel..pixel + 4], &before[pixel..pixel + 4]);
+        assert_eq!(h.app.editor.document, doc);
+        assert_eq!(h.app.editor.state_id(), state);
+        h.click("Show edited");
+        let restored = h.capture(&format!("tone-restored-{scale}"));
+        assert_eq!(&edited[pixel..pixel + 4], &restored[pixel..pixel + 4]);
+        assert_eq!(h.app.editor.state_id(), state);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while h.app.histogram_revision != h.app.gpu.renders {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+            h.frame(Vec::new());
+        }
+        assert!(h.app.histogram_rows.is_some());
+    }
+}
+
+#[test]
+fn histogram_drops_stale_snapshot_and_requests_the_current_generation() {
+    let mut h = Harness::new([1000, 900], 1.0);
+    let (tx, rx) = mpsc::sync_channel(1);
+    let stale = h.app.gpu.renders;
+    h.app.histogram = Some((stale, rx));
+    h.app.histogram_rows = None;
+    h.app.editor.edit(|doc, _| doc.layers[0].exposure = 1.0);
     h.frame(Vec::new());
-    assert!(h.app.new_size.is_some());
-    h.click("Create canvas");
-    assert!(h.app.pending.is_some());
-    let blocked_before = h.app.editor.document.clone();
-    h.key(egui::Key::Z, Modifiers::COMMAND);
-    h.key(egui::Key::O, Modifiers::COMMAND);
-    h.frame(Vec::new());
-    assert!(h.app.job.is_none(), "no file job may start behind a modal");
-    assert!(
-        h.app.editor.document == blocked_before,
-        "document must not change while the unsaved-work modal is up"
+    tx.send(Ok([[42; 256]; 4])).unwrap();
+    h.app.poll_histogram(&h.ctx);
+    assert!(h.app.histogram_rows.is_none());
+    assert_eq!(
+        h.app.histogram.as_ref().map(|(generation, _)| *generation),
+        Some(h.app.gpu.renders)
     );
-    h.key(egui::Key::Escape, Modifiers::NONE);
-    h.frame(Vec::new());
-    assert!(h.app.pending.is_none());
-    h.frame(Vec::new());
-    h.key(egui::Key::Z, Modifiers::COMMAND);
-    assert_ne!(
-        h.app.editor.document, before,
-        "after dismissal, undo must work again"
-    );
-    assert_eq!(h.app.editor.document.layers.len(), 1);
 }
