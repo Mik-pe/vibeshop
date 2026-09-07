@@ -235,13 +235,6 @@ impl Harness {
             repeat: false,
             modifiers,
         }]);
-        self.frame(vec![Event::Key {
-            key: egui::Key::F,
-            physical_key: Some(egui::Key::F),
-            pressed: false,
-            repeat: false,
-            modifiers: Modifiers::NONE,
-        }]);
     }
     fn drag(&mut self, start: Pos2, end: Pos2) {
         self.frame(vec![Event::PointerMoved(start)]);
@@ -532,14 +525,23 @@ fn keyboard_focus_and_activation_work_like_assistive_technology() {
         "Space on the focused visibility checkbox must hide the layer"
     );
     // Enter activates a focused button command.
+    let fitted_zoom = h.app.zoom;
+    h.app.fit = false;
+    h.app.zoom = fitted_zoom * 2.0;
+    h.app.pan = egui::vec2(40.0, 30.0);
     h.focus(&fit);
     h.frame(Vec::new());
+    assert!(!h.app.fit);
+    assert_eq!(h.app.zoom, fitted_zoom * 2.0);
+    assert_eq!(h.app.pan, egui::vec2(40.0, 30.0));
     h.press(egui::Key::Enter);
     h.frame(Vec::new());
     assert!(
         h.app.fit,
         "Enter on the focused Fit button must fit the canvas"
     );
+    assert_eq!(h.app.zoom, fitted_zoom);
+    assert_eq!(h.app.pan, egui::Vec2::ZERO);
 }
 
 #[test]

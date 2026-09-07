@@ -29,7 +29,8 @@ impl Studio {
                                     egui::Button::new(
                                         RichText::new(format!("{} New canvas…", icons::NEW_CANVAS))
                                             .color(TEXT),
-                                    ),
+                                    )
+                                    .shortcut_text("Ctrl/Cmd+N"),
                                 )
                                 .clicked()
                             {
