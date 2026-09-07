@@ -25,10 +25,19 @@ fn main() -> anyhow::Result<()> {
     );
     patch.offset = [1700, 900];
     document.layers.push(patch);
-    for (name, index) in [("full_canvas_adjustment", 0), ("local_layer_adjustment", 1)] {
+    for (name, index) in [
+        ("full_canvas_adjustment", 0),
+        ("local_layer_adjustment", 1),
+        ("full_canvas_levels_curve", 0),
+    ] {
         let mut samples = Vec::new();
         for n in 0..110 {
-            document.layers[index].exposure = if n % 2 == 0 { 0.5 } else { 0.0 };
+            if name == "full_canvas_levels_curve" {
+                document.layers[0].levels.gamma = if n % 2 == 0 { 1.2 } else { 1.0 };
+                document.layers[0].curves[0].set(16, if n % 2 == 0 { 0.4 } else { 0.5 })?;
+            } else {
+                document.layers[index].exposure = if n % 2 == 0 { 0.5 } else { 0.0 };
+            }
             let start = Instant::now();
             engine.render(&document)?;
             engine.device.poll(wgpu::PollType::Wait {

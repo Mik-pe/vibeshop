@@ -263,7 +263,7 @@ impl Harness {
         }
         assert!(self.app.error.is_none(), "{:?}", self.app.error);
     }
-    fn capture(&self, name: &str) {
+    fn capture(&self, name: &str) -> Vec<u8> {
         let width = self.target.width();
         let height = self.target.height();
         let stride = (width * 4).div_ceil(256) * 256;
@@ -325,6 +325,7 @@ impl Harness {
         .unwrap();
         drop(data);
         buffer.unmap();
+        pixels
     }
 }
 
@@ -574,4 +575,265 @@ fn modal_dialogs_block_shortcuts_from_behind() {
         "after dismissal, undo must work again"
     );
     assert_eq!(h.app.editor.document.layers.len(), 1);
+}
+
+#[test]
+fn curve_editor_drags_bend_pixels_and_histogram_follows() {
+    // Tall enough that the tone panel's curve editor is fully on screen.
+    let mut h = Harness::new([1000, 900], 1.0);
+    let before = h.app.editor.document.layers[0].clone();
+    let before_doc = h.app.editor.document.clone();
+    // The curve editor canvas sits under the CURVES section; reach it by
+    // its accessible name through the accesskit tree.
+    let rect = h.rect("Tone curve editor, RGB");
+    // Drag the midtone part of the curve downward (screen y grows down).
+    let start = egui::pos2(rect.left() + rect.width() * 0.4, rect.center().y);
+    h.drag(
+        start,
+        egui::pos2(start.x + 40.0, rect.center().y + rect.height() * 0.35),
+    );
+    let after = h.app.editor.document.layers[0].clone();
+    assert!(
+        after.curves[0] != before.curves[0],
+        "dragging inside the editor must define curve control points"
+    );
+    assert!(
+        !after.curves[0].is_neutral(),
+        "the edited curve must have defined points"
+    );
+    // The histogram of the edited composition arrives without blocking.
+    for _ in 0..30 {
+        h.frame(Vec::new());
+        if h.app.histogram_rows.is_some() {
+            break;
+        }
+    }
+    h.capture("workspace-curves");
+    // Scroll the properties panel to reveal levels + histogram.
+    h.frame(vec![Event::PointerMoved(egui::pos2(850.0, 300.0))]);
+    for _ in 0..6 {
+        h.frame(vec![Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -120.0),
+            modifiers: Modifiers::NONE,
+        }]);
+    }
+    h.frame(Vec::new());
+    h.frame(Vec::new());
+    h.capture("workspace-histogram");
+    let rows = h
+        .app
+        .histogram_rows
+        .expect("the GPU histogram must arrive after an edit");
+    let total: u64 = rows[0].iter().map(|count| u64::from(*count)).sum();
+    assert!(total > 0, "the luminance histogram must count pixels");
+    // The whole drag is one gesture: a single undo restores everything.
+    h.key(egui::Key::Z, Modifiers::COMMAND);
+    assert_eq!(
+        h.app.editor.document, before_doc,
+        "one undo must restore the pre-drag document"
+    );
+    for _ in 0..30 {
+        h.frame(Vec::new());
+        if h.app.histogram_revision == h.app.gpu.renders && h.app.histogram.is_none() {
+            break;
+        }
+    }
+}
+
+#[test]
+fn tone_keyboard_drag_cancellation_and_compare_are_real_controls() {
+    for scale in [1.0, 1.5] {
+        let mut h = Harness::new([1000, 1100], scale);
+        let name = "Tone curve editor, RGB";
+        h.focus(name);
+        h.key(egui::Key::ArrowUp, Modifiers::NONE);
+        assert!(h.app.editor.document.layers[0].curves[0].get(16).is_some());
+        h.key(egui::Key::ArrowRight, Modifiers::NONE);
+        assert_eq!(h.app.curve_handle, Some(17));
+        h.key(egui::Key::ArrowUp, Modifiers::SHIFT);
+        assert!(h.app.editor.document.layers[0].curves[0].get(17).is_some());
+        h.key(egui::Key::Delete, Modifiers::NONE);
+        assert!(h.app.editor.document.layers[0].curves[0].get(17).is_none());
+        h.key(egui::Key::Z, Modifiers::COMMAND);
+        assert!(h.app.editor.document.layers[0].curves[0].get(17).is_some());
+        h.key(egui::Key::Z, Modifiers::COMMAND | Modifiers::SHIFT);
+        assert!(h.app.editor.document.layers[0].curves[0].get(17).is_none());
+        let original = h.app.editor.document.clone();
+        let state = h.app.editor.state_id();
+        let rect = h.rect(name);
+        let start = rect.center();
+        let end = start + egui::vec2(25.0, 20.0);
+        h.frame(vec![
+            Event::PointerMoved(start),
+            Event::PointerButton {
+                pos: start,
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            },
+        ]);
+        h.frame(vec![Event::PointerMoved(end)]);
+        assert_ne!(h.app.editor.document, original);
+        h.key(egui::Key::Escape, Modifiers::NONE);
+        h.frame(vec![Event::PointerButton {
+            pos: end,
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        }]);
+        assert_eq!(h.app.editor.document, original);
+        assert_eq!(h.app.editor.state_id(), state);
+        h.app.editor.edit(|doc, _| {
+            doc.layers[0].exposure = -1.0;
+            doc.layers[0].levels.gamma = 1.4;
+        });
+        h.frame(vec![Event::PointerMoved(egui::pos2(850.0, 300.0))]);
+        for _ in 0..12 {
+            h.frame(vec![Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -120.0),
+                modifiers: Modifiers::NONE,
+            }]);
+        }
+        h.frame(Vec::new());
+        let doc = h.app.editor.document.clone();
+        let state = h.app.editor.state_id();
+        let export = h.app.gpu.readback().unwrap().finish().unwrap();
+        let edited = h.capture(&format!("tone-edited-{scale}"));
+        h.click("Show before");
+        let before = h.capture(&format!("tone-before-{scale}"));
+        let pixel =
+            ((400.0 * scale) as usize * h.target.width() as usize + (200.0 * scale) as usize) * 4;
+        assert_ne!(&edited[pixel..pixel + 4], &before[pixel..pixel + 4]);
+        assert_eq!(h.app.editor.document, doc);
+        assert_eq!(h.app.editor.state_id(), state);
+        h.click("Show edited");
+        let restored = h.capture(&format!("tone-restored-{scale}"));
+        assert_eq!(&edited[pixel..pixel + 4], &restored[pixel..pixel + 4]);
+        assert_eq!(h.app.editor.state_id(), state);
+        h.click("Show before");
+        let snapshot = h.app.export_snapshot().unwrap().finish().unwrap();
+        assert_eq!(
+            snapshot, export,
+            "the actual export controller must snapshot edited pixels during compare"
+        );
+        assert!(!h.app.compare);
+        assert_eq!(h.app.editor.state_id(), state);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while h.app.histogram_revision != h.app.gpu.renders {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+            h.frame(Vec::new());
+        }
+        assert!(h.app.histogram_rows.is_some());
+        h.frame(Vec::new());
+        h.capture(&format!("tone-histogram-final-{scale}"));
+    }
+}
+
+#[test]
+fn histogram_drops_stale_snapshot_and_requests_the_current_generation() {
+    let mut h = Harness::new([1000, 900], 1.0);
+    let (tx, rx) = mpsc::sync_channel(1);
+    let stale = h.app.gpu.renders;
+    h.app.histogram = Some((stale, rx));
+    h.app.histogram_rows = None;
+    h.app.editor.edit(|doc, _| doc.layers[0].exposure = 1.0);
+    h.frame(Vec::new());
+    tx.send(Ok([[42; 256]; 4])).unwrap();
+    h.app.poll_histogram(&h.ctx);
+    assert!(h.app.histogram_rows.is_none());
+    assert_eq!(
+        h.app.histogram.as_ref().map(|(generation, _)| *generation),
+        Some(h.app.gpu.renders)
+    );
+}
+
+#[test]
+fn exact_curve_values_reset_and_levels_controls_change_exported_pixels() {
+    let mut h = Harness::new([1000, 1400], 1.0);
+    h.click("Curve output");
+    h.click("Curve output");
+    h.key(egui::Key::A, Modifiers::COMMAND);
+    h.frame(vec![Event::Text("0.350".into())]);
+    h.key(egui::Key::Enter, Modifiers::NONE);
+    assert_eq!(
+        h.app.editor.document.layers[0].curves[0].get(16),
+        Some(0.35)
+    );
+    let changed = h.app.gpu.readback().unwrap().finish().unwrap();
+    h.click("Reset channel curve");
+    assert!(h.app.editor.document.layers[0].curves[0].is_neutral());
+    let neutral = h.app.gpu.readback().unwrap().finish().unwrap();
+    assert_ne!(changed, neutral);
+    h.focus("Gamma");
+    h.frame(Vec::new());
+    h.key(egui::Key::ArrowRight, Modifiers::NONE);
+    assert_ne!(h.app.editor.document.layers[0].levels.gamma, 1.0);
+    assert_ne!(h.app.gpu.readback().unwrap().finish().unwrap(), neutral);
+    h.key(egui::Key::Z, Modifiers::COMMAND);
+    assert_eq!(h.app.gpu.readback().unwrap().finish().unwrap(), neutral);
+    h.capture("tone-precision-controls");
+}
+
+#[test]
+fn histogram_failure_stops_retrying_until_a_new_render() {
+    let mut h = Harness::new([1000, 900], 1.0);
+    let generation = h.app.gpu.renders;
+    let (tx, rx) = mpsc::sync_channel(1);
+    h.app.histogram = Some((generation, rx));
+    tx.send(Err(anyhow::anyhow!("injected map failure")))
+        .unwrap();
+    h.app.poll_histogram(&h.ctx);
+    assert!(h.app.histogram.is_none());
+    assert_eq!(
+        h.app.histogram_error.as_deref(),
+        Some("injected map failure")
+    );
+    for _ in 0..4 {
+        h.app.poll_histogram(&h.ctx);
+        assert!(h.app.histogram.is_none());
+    }
+    h.app.editor.edit(|doc, _| doc.layers[0].exposure = 1.0);
+    h.app.render();
+    h.app.poll_histogram(&h.ctx);
+    assert!(h.app.histogram.is_some());
+    assert!(h.app.histogram_error.is_none());
+}
+
+#[test]
+fn fast_curve_drag_moves_the_original_point_and_escape_restores_it() {
+    let mut h = Harness::new([1000, 1100], 1.0);
+    h.app
+        .editor
+        .edit(|doc, _| doc.layers[0].curves[0].set(16, 0.3).unwrap());
+    h.frame(Vec::new());
+    let original = h.app.editor.document.clone();
+    let rect = h.rect("Tone curve editor, RGB");
+    let start = egui::pos2(rect.center().x, rect.bottom() - rect.height() * 0.3);
+    let end = egui::pos2(
+        rect.left() + rect.width() * 0.75,
+        rect.bottom() - rect.height() * 0.6,
+    );
+    h.frame(vec![
+        Event::PointerMoved(start),
+        Event::PointerButton {
+            pos: start,
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        },
+    ]);
+    h.frame(vec![Event::PointerMoved(end)]);
+    assert!(h.app.editor.document.layers[0].curves[0].get(16).is_none());
+    assert!(h.app.editor.document.layers[0].curves[0].get(24).is_some());
+    h.key(egui::Key::Escape, Modifiers::NONE);
+    h.frame(vec![Event::PointerButton {
+        pos: end,
+        button: PointerButton::Primary,
+        pressed: false,
+        modifiers: Modifiers::NONE,
+    }]);
+    assert_eq!(h.app.editor.document, original);
 }

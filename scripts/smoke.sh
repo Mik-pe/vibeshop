@@ -76,4 +76,17 @@ xdotool mouseup 1
 xdotool key --clearmodifiers ctrl+z
 capture restored
 [[ "$(canvas_hash restored)" == "$original" ]] || { echo 'Undo did not restore exposure' >&2; exit 1; }
-printf 'Native UI move, undo, redo and exposure checks passed. Captures: artifacts/\n'
+# The tone editor's midpoint in the same fixed-size workspace.
+xdotool mousemove --sync --window "$window" 1288 566
+sleep 0.2
+xdotool mousedown 1
+sleep 0.2
+xdotool mousemove --sync --window "$window" 1288 594
+sleep 0.2
+xdotool mouseup 1
+capture curve
+[[ "$(canvas_hash curve)" != "$original" ]] || { echo 'Curve drag did not change rendered pixels' >&2; exit 1; }
+xdotool key --clearmodifiers ctrl+z
+capture curve-undone
+[[ "$(canvas_hash curve-undone)" == "$original" ]] || { echo 'Undo did not restore curve pixels' >&2; exit 1; }
+printf 'Native UI move, undo, redo, exposure and curve checks passed. Captures: artifacts/\n'

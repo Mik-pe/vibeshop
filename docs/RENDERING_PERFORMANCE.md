@@ -57,3 +57,43 @@ The initial tile candidate used a render-pass clear per tile and regressed
 full-canvas timing. The final shader starts the first intersecting layer with a
 transparent backdrop and explicitly clears empty output tiles. The old
 whole-image path and the extra clear pass are removed; there is one compositor.
+
+## Tone panel and live histogram cost (2026-09-07)
+
+Baseline `4f08c04`; tone/histogram production code `395dcd9`. Same locked release
+benchmark, adapter/driver/backend, warm-up and sample count described above;
+no other repository GPU tests or CI jobs ran during this matched pair.
+
+| Workload | Main p50 / p95 | Tone + histogram p50 / p95 |
+| --- | --- | --- |
+| Full-canvas exposure | 11.513 / 11.872 ms | 15.752 / 17.047 ms |
+| Local-layer exposure | 3.343 / 3.559 ms | 4.238 / 4.449 ms |
+| Process peak RSS | 100,804 KiB | 111,028 KiB |
+
+Both uploaded exactly two sources. This measures the cost of keeping the live
+histogram current during ordinary exposure edits, including neutral curve LUTs;
+it does not measure an active curve drag or input-to-visible latency. The full
+edit p95 exceeds the 16.7 ms interaction target even before presentation. This is
+an explicit remaining performance limitation, not Photoshop parity or a claim
+that the new controls are free. Process RSS is not total GPU residency and no
+per-event allocation count was measured.
+
+The first separate histogram pass measured 32.537 ms full-edit p95. The final
+implementation shares the final linear-pixel load with the existing encode pass,
+processes 32×32 regions per 64-lane workgroup, and coalesces repeated bins within
+each lane. Only changed tiles replace their cached bins; a small GPU reduction
+sums them before the bounded 4 KiB asynchronous readback. There is no second
+compositor or full-image CPU histogram. Histograms add at most 1 MiB of cached
+GPU counters under the existing dimension limits. Timing this generated,
+mostly uniform workload does not establish results for arbitrary photos.
+
+An additional candidate-only run at `b3f423b` adds
+`full_canvas_levels_curve`: after the two exposure scenarios, alternate the
+background's gamma between 1.2/1.0 and its RGB curve midpoint between 0.4/0.5.
+The same generated document, 10 warm-up / 100 samples and render-to-GPU-completion
+timer include per-edit LUT regeneration/upload and active tone evaluation.
+This scenario measured p50 **17.240 ms**, p95 **18.292 ms**. The same run's
+exposure p95 values were 16.972 ms full and 4.410 ms local; process peak RSS across
+all three scenarios was 103,828 KiB. This is a separate run, not a replacement
+for the matched comparison above. Document mutation before `Engine::render`,
+UI input, presentation and per-event allocation counts remain unmeasured.

@@ -43,6 +43,15 @@ fn studio() -> (Studio, egui::Context) {
             job: None,
             pending: None,
             icons_checked: true,
+            curve_channel: 0,
+            curve_handle: Some(16),
+            curve_drag: None,
+            curve_cancelled: false,
+            histogram: None,
+            histogram_rows: None,
+            histogram_error: None,
+            histogram_revision: 0,
+            compare: false,
             allow_close: false,
             status: String::new(),
             error: None,
@@ -89,8 +98,17 @@ fn project_open_keyboard_save_reopen_and_export_keep_the_same_pixels() {
     app.request(Action::Open(Some(path.clone()), false), &ctx);
     drain(&mut app, &ctx);
     assert!(app.error.is_none(), "{:?}", app.error);
-    app.editor
-        .edit(|document, _| document.layers[0].exposure = 0.5);
+    app.editor.edit(|document, _| {
+        let layer = &mut document.layers[0];
+        layer.exposure = 0.5;
+        layer.levels = vibeshop::curves::Levels {
+            black: 0.1,
+            gamma: 1.4,
+            white: 0.9,
+        };
+        layer.curves[0].set(16, 0.3).unwrap();
+        layer.curves[2].set(24, 0.8).unwrap();
+    });
     let mut top = app.editor.document.layers[0].clone();
     top.blend = Blend::Multiply;
     top.opacity = 0.4;

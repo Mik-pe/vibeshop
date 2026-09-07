@@ -200,3 +200,160 @@ fn nonuniform_source_coordinates_survive_tile_boundaries_and_replacement() {
         close(actual, if expected[3] == 0 { &[0; 4] } else { expected });
     }
 }
+
+#[test]
+fn levels_curves_channel_order_and_alpha_match_independent_math() {
+    use vibeshop::curves::Levels;
+    let mut e = engine();
+    let mut d = Document::new(layer([137, 188, 225, 128], 1, 1));
+    d.layers[0].levels = Levels {
+        black: 0.25,
+        gamma: 1.0,
+        white: 0.75,
+    };
+    close(&render(&mut e, &d), &[0, 188, 255, 128]);
+    d.layers[0].levels = Levels {
+        black: 0.0,
+        gamma: 2.0,
+        white: 1.0,
+    };
+    let linear = |v: u8| {
+        let x = f32::from(v) / 255.0;
+        if x <= 0.04045 {
+            x / 12.92
+        } else {
+            ((x + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let encode = |v: f32| {
+        ((if v <= 0.0031308 {
+            v * 12.92
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        }) * 255.0)
+            .round() as u8
+    };
+    close(
+        &render(&mut e, &d),
+        &[
+            encode(linear(137).sqrt()),
+            encode(linear(188).sqrt()),
+            encode(linear(225).sqrt()),
+            128,
+        ],
+    );
+    d.layers[0].levels = Levels::default();
+    d.layers[0].curves[0].set(16, 0.25).unwrap();
+    d.layers[0].curves[1].set(16, 0.75).unwrap();
+    let master = |x: f32| {
+        if x <= 0.5 {
+            x * 0.5
+        } else {
+            0.25 + (x - 0.5) * 1.5
+        }
+    };
+    let red = |x: f32| {
+        if x <= 0.5 {
+            x * 1.5
+        } else {
+            0.75 + (x - 0.5) * 0.5
+        }
+    };
+    close(
+        &render(&mut e, &d),
+        &[
+            encode(red(master(linear(137)))),
+            encode(master(linear(188))),
+            encode(master(linear(225))),
+            128,
+        ],
+    );
+    let adjusted = render(&mut e, &d);
+    e.set_compare(true);
+    e.render(&d).unwrap();
+    assert!(
+        e.readback().is_err(),
+        "comparison must never export as the edited document"
+    );
+    e.set_compare(false);
+    assert_eq!(render(&mut e, &d), adjusted);
+}
+
+#[test]
+fn curve_cache_and_tile_histograms_follow_edits_empty_tiles_and_transparency() {
+    let mut e = engine();
+    let mut d = Document::new(layer([188, 188, 188, 255], 513, 1));
+    let mut right = layer([188, 188, 188, 128], 1, 1);
+    right.offset = [512, 0];
+    d.layers.push(right);
+    d.layers[0].curves[0].set(16, 0.25).unwrap();
+    d.layers[1].curves[0].set(16, 0.75).unwrap();
+    let first = render(&mut e, &d);
+    assert!(
+        first[512 * 4] > first[0],
+        "distinct layer LUTs must stay distinct"
+    );
+    let before = e.tiles_rendered;
+    d.layers[1].curves[0].set(16, 0.5).unwrap();
+    let second = render(&mut e, &d);
+    assert_eq!(e.tiles_rendered - before, 1);
+    assert_eq!(&first[..512 * 4], &second[..512 * 4]);
+    assert_ne!(&first[512 * 4..], &second[512 * 4..]);
+    let rows = e.histogram().unwrap().finish().unwrap();
+    for row in rows {
+        assert_eq!(row.iter().sum::<u32>(), 513);
+    }
+    d.layers[0].visible = false;
+    render(&mut e, &d);
+    let rows = e.histogram().unwrap().finish().unwrap();
+    for row in rows {
+        assert_eq!(row.iter().sum::<u32>(), 1);
+    }
+    d.layers[1].visible = false;
+    render(&mut e, &d);
+    assert_eq!(e.histogram().unwrap().finish().unwrap(), [[0; 256]; 4]);
+    d = Document::new(layer([255, 0, 0, 255], 1, 1));
+    render(&mut e, &d);
+    let rows = e.histogram().unwrap().finish().unwrap();
+    assert_eq!(rows[0][54], 1);
+    assert_eq!(rows[1][255], 1);
+    assert_eq!(rows[2][0], 1);
+    assert_eq!(rows[3][0], 1);
+    d = Document::new(layer([255, 255, 255, 0], 1, 1));
+    render(&mut e, &d);
+    assert_eq!(e.histogram().unwrap().finish().unwrap(), [[0; 256]; 4]);
+}
+
+#[test]
+fn histogram_counts_nonuniform_pixels_across_both_group_and_tile_edges() {
+    let (width, height) = (519, 37);
+    let palette = [
+        [255, 0, 0, 255],
+        [0, 255, 0, 255],
+        [0, 0, 255, 255],
+        [255, 255, 255, 255],
+        [255, 255, 255, 0],
+    ];
+    let mut bytes = Vec::new();
+    let mut expected = [[0_u32; 256]; 4];
+    for y in 0..height {
+        for x in 0..width {
+            let index = ((x + 3 * y) % 5) as usize;
+            bytes.extend_from_slice(&palette[index]);
+            if index == 4 {
+                continue;
+            }
+            expected[0][[54, 182, 18, 255][index]] += 1;
+            for channel in 0..3 {
+                expected[channel + 1][palette[index][channel] as usize] += 1;
+            }
+        }
+    }
+    let d = Document::new(Layer::new(
+        "nonuniform histogram",
+        Source::new(width, height, bytes).unwrap(),
+    ));
+    let mut e = engine();
+    render(&mut e, &d);
+    assert_eq!(e.histogram().unwrap().finish().unwrap(), expected);
+}

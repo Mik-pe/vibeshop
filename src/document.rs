@@ -5,6 +5,8 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
+use crate::curves::{Curve, Levels};
+
 pub const MAX_PIXELS: u64 = 16 * 1024 * 1024;
 pub const MAX_DIMENSION: u32 = 8192;
 pub const MAX_SOURCE_BYTES: usize = 128 * 1024 * 1024;
@@ -79,6 +81,10 @@ pub struct Layer {
     pub saturation: f32,
     pub blend: Blend,
     pub offset: [i32; 2],
+    /// Master levels and per-channel curves, applied in linear light
+    /// after exposure/contrast/saturation.
+    pub levels: Levels,
+    pub curves: [Curve; 4],
 }
 impl Layer {
     pub fn new(name: impl Into<String>, source: Arc<Source>) -> Self {
@@ -92,12 +98,17 @@ impl Layer {
             saturation: 1.0,
             blend: Blend::Normal,
             offset: [0, 0],
+            levels: Levels::default(),
+            curves: Default::default(),
         }
     }
+    /// Every non-destructive adjustment back to neutral.
     pub fn reset_adjustments(&mut self) {
         self.exposure = 0.0;
         self.contrast = 1.0;
         self.saturation = 1.0;
+        self.levels = Levels::default();
+        self.curves = Default::default();
     }
 }
 
@@ -148,6 +159,16 @@ impl Document {
                     && (0.0..=2.0).contains(&layer.saturation),
                 "Invalid adjustment values"
             );
+            ensure!(
+                (0.0..=0.99).contains(&layer.levels.black)
+                    && (0.01..=1.0).contains(&layer.levels.white)
+                    && layer.levels.white - layer.levels.black >= 0.00999999
+                    && (0.2..=5.0).contains(&layer.levels.gamma),
+                "Invalid levels values"
+            );
+            for curve in &layer.curves {
+                curve.validate()?;
+            }
             ensure!(
                 layer.offset.iter().all(|x| (-8192..=8192).contains(x)),
                 "Layer offset out of range"

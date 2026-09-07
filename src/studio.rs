@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
-use std::{path::PathBuf, sync::mpsc::Receiver};
+use std::{
+    path::PathBuf,
+    sync::mpsc::{Receiver, TryRecvError},
+};
 
 mod files;
 mod icons;
@@ -44,6 +47,20 @@ pub struct Studio {
     new_size: Option<[u32; 2]>,
     startup: Option<PathBuf>,
     icons_checked: bool,
+    /// Which curve is being edited in the tone panel.
+    curve_channel: usize,
+    /// Index of the curve control point being edited, if any.
+    curve_handle: Option<usize>,
+    curve_drag: Option<vibeshop::curves::Curve>,
+    curve_cancelled: bool,
+    /// Histogram readback job: polls for completion without blocking.
+    histogram: Option<(u64, Receiver<Result<vibeshop::gpu::HistogramData>>)>,
+    histogram_rows: Option<vibeshop::gpu::HistogramData>,
+    histogram_error: Option<String>,
+    /// Document revision the displayed histogram describes.
+    histogram_revision: u64,
+    /// Preview unadjusted tones; exported pixels always use document adjustments.
+    compare: bool,
 }
 impl Studio {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Result<Self> {
@@ -87,10 +104,19 @@ impl Studio {
             new_size: None,
             startup,
             icons_checked: false,
+            curve_channel: 0,
+            curve_handle: Some(16),
+            curve_drag: None,
+            curve_cancelled: false,
+            histogram: None,
+            histogram_rows: None,
+            histogram_error: None,
+            histogram_revision: 0,
+            compare: false,
         }
     }
     fn render(&mut self) -> bool {
-        if self.rendered_revision == self.editor.revision {
+        if self.rendered_revision == self.editor.revision && self.gpu.render_valid() {
             return self.render_valid;
         }
         self.render_valid = false;
@@ -323,6 +349,7 @@ impl Studio {
         self.status_bar(ctx);
         self.inspector(ctx);
         self.canvas(ctx);
+        self.poll_histogram(ctx);
         if !ctx.input(|i| i.pointer.any_down()) {
             self.editor.finish_edit();
         }
@@ -363,6 +390,51 @@ fn png_destination(path: &std::path::Path) -> Result<PathBuf> {
 }
 fn zoom_pan(pan: Vec2, anchor: Vec2, ratio: f32) -> Vec2 {
     anchor - (anchor - pan) * ratio
+}
+impl Studio {
+    /// One in-flight copy, tagged with the GPU render generation. A completed
+    /// older snapshot must never be labeled as the latest image.
+    fn poll_histogram(&mut self, ctx: &egui::Context) {
+        if let Some((generation, job)) = &self.histogram {
+            match job.try_recv() {
+                Ok(Ok(rows)) => {
+                    if *generation == self.gpu.renders && self.gpu.render_valid() {
+                        self.histogram_rows = Some(rows);
+                        self.histogram_revision = *generation;
+                    }
+                    self.histogram = None;
+                }
+                Ok(Err(error)) => {
+                    self.histogram_revision = *generation;
+                    self.histogram_rows = None;
+                    self.histogram_error = Some(error.to_string());
+                    self.histogram = None;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.histogram_revision = *generation;
+                    self.histogram_rows = None;
+                    self.histogram_error = Some("Histogram worker stopped".into());
+                    self.histogram = None;
+                }
+                Err(TryRecvError::Empty) => {
+                    return;
+                }
+            }
+        }
+        if self.gpu.render_valid()
+            && self.histogram_revision != self.gpu.renders
+            && let Ok(readback) = self.gpu.histogram()
+        {
+            self.histogram_error = None;
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(readback.finish());
+                ctx.request_repaint();
+            });
+            self.histogram = Some((self.gpu.renders, rx));
+        }
+    }
 }
 fn theme(ctx: &egui::Context) {
     let mut visuals = egui::Visuals::dark();

@@ -120,16 +120,28 @@ impl Studio {
         });
     }
 
+    pub(super) fn export_snapshot(&mut self) -> Result<vibeshop::gpu::Readback> {
+        self.compare = false;
+        self.gpu.set_compare(false);
+        ensure!(
+            self.render(),
+            "{}",
+            self.error
+                .as_deref()
+                .unwrap_or("The edited document could not be rendered")
+        );
+        self.gpu.readback()
+    }
+
     pub(super) fn export(&mut self, ctx: &egui::Context) {
         if self.job.is_some()
             || self.pending.is_some()
             || self.error.is_some()
             || self.new_size.is_some()
-            || !self.render()
         {
             return;
         }
-        let snapshot = match self.gpu.readback() {
+        let snapshot = match self.export_snapshot() {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 self.error = Some(error.to_string());
