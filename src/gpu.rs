@@ -1,4 +1,4 @@
-use crate::document::Document;
+use crate::document::{Blend, Document, Layer};
 use anyhow::{Context, Result, ensure};
 use bytemuck::{Pod, Zeroable};
 use std::{
@@ -8,13 +8,48 @@ use std::{
 };
 use wgpu::util::DeviceExt;
 
+pub const TILE_SIZE: u32 = 512;
+
+// Only pixel-affecting state is retained; names and old source assets are not.
+#[derive(Clone, PartialEq)]
+struct LayerKey {
+    source: u64,
+    tone: [f32; 4],
+    offset: [i32; 2],
+    blend: Blend,
+}
+impl From<&Layer> for LayerKey {
+    fn from(layer: &Layer) -> Self {
+        Self {
+            source: layer.source.id,
+            tone: [
+                layer.exposure,
+                layer.contrast,
+                layer.saturation,
+                layer.opacity,
+            ],
+            offset: layer.offset,
+            blend: layer.blend,
+        }
+    }
+}
+fn intersects(layer: &Layer, x: u32, y: u32, width: u32, height: u32) -> bool {
+    let [lx, ly] = layer.offset.map(i64::from);
+    layer.visible
+        && layer.opacity > 0.0
+        && lx < i64::from(x + width)
+        && ly < i64::from(y + height)
+        && lx + i64::from(layer.source.width) > i64::from(x)
+        && ly + i64::from(layer.source.height) > i64::from(y)
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Parameters {
     tone: [f32; 4],
     offset: [i32; 2],
     blend: u32,
-    padding: u32,
+    clear_backdrop: u32,
 }
 
 struct Surface {
@@ -51,6 +86,7 @@ struct Targets {
     scratch: [Surface; 2],
     display: Surface,
     export: Surface,
+    tiles: Vec<Vec<LayerKey>>,
 }
 
 pub struct Engine {
@@ -62,6 +98,7 @@ pub struct Engine {
     targets: Option<Targets>,
     pub uploads: u64,
     pub renders: u64,
+    pub tiles_rendered: u64,
     render_valid: bool,
 }
 impl Engine {
@@ -93,10 +130,12 @@ impl Engine {
             targets: None,
             uploads: 0,
             renders: 0,
+            tiles_rendered: 0,
             render_valid: false,
         }
     }
     pub fn render(&mut self, document: &Document) -> Result<bool> {
+        let previous_valid = self.render_valid;
         self.render_valid = false;
         document.validate()?;
         let limit = self.device.limits().max_texture_dimension_2d;
@@ -120,11 +159,26 @@ impl Engine {
                 width: document.width,
                 height: document.height,
                 scratch: [
-                    make(wgpu::TextureFormat::Rgba16Float),
-                    make(wgpu::TextureFormat::Rgba16Float),
+                    Surface::new(
+                        &self.device,
+                        TILE_SIZE,
+                        TILE_SIZE,
+                        wgpu::TextureFormat::Rgba16Float,
+                    ),
+                    Surface::new(
+                        &self.device,
+                        TILE_SIZE,
+                        TILE_SIZE,
+                        wgpu::TextureFormat::Rgba16Float,
+                    ),
                 ],
                 display: make(wgpu::TextureFormat::Rgba8Unorm),
                 export: make(wgpu::TextureFormat::Rgba8Unorm),
+                tiles: vec![
+                    Vec::new();
+                    (document.width.div_ceil(TILE_SIZE) * document.height.div_ceil(TILE_SIZE))
+                        as usize
+                ],
             });
         }
         let active: HashSet<_> = document.layers.iter().map(|l| l.source.id).collect();
@@ -158,96 +212,113 @@ impl Engine {
                 self.uploads += 1;
             }
         }
-        let t = self.targets.as_ref().context("No GPU targets")?;
+        let t = self.targets.as_mut().context("No GPU targets")?;
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        {
-            let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Clear composition"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &t.scratch[0].view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-        }
-        let mut current = 0;
-        for layer in document
-            .layers
-            .iter()
-            .filter(|l| l.visible && l.opacity > 0.0)
-        {
-            let parameters = Parameters {
-                tone: [
-                    layer.exposure,
-                    layer.contrast,
-                    layer.saturation,
-                    layer.opacity,
-                ],
-                offset: layer.offset,
-                blend: layer.blend as u32,
-                padding: 0,
-            };
-            let uniform = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Layer adjustments"),
-                    contents: bytemuck::bytes_of(&parameters),
-                    usage: wgpu::BufferUsages::UNIFORM,
+        let mut changed = 0;
+        for y in (0..t.height).step_by(TILE_SIZE as usize) {
+            for x in (0..t.width).step_by(TILE_SIZE as usize) {
+                let width = TILE_SIZE.min(t.width - x);
+                let height = TILE_SIZE.min(t.height - y);
+                let layers: Vec<_> = document
+                    .layers
+                    .iter()
+                    .filter(|l| intersects(l, x, y, width, height))
+                    .collect();
+                let keys: Vec<_> = layers.iter().map(|l| LayerKey::from(*l)).collect();
+                let index = (y / TILE_SIZE * t.width.div_ceil(TILE_SIZE) + x / TILE_SIZE) as usize;
+                if previous_valid && !resized && t.tiles[index] == keys {
+                    continue;
+                }
+                changed += 1;
+                let mut current = 0;
+                let empty = layers.is_empty();
+                for (layer_index, layer) in layers.into_iter().enumerate() {
+                    let parameters = Parameters {
+                        tone: [
+                            layer.exposure,
+                            layer.contrast,
+                            layer.saturation,
+                            layer.opacity,
+                        ],
+                        offset: [layer.offset[0] - x as i32, layer.offset[1] - y as i32],
+                        blend: layer.blend as u32,
+                        clear_backdrop: u32::from(layer_index == 0),
+                    };
+                    let uniform =
+                        self.device
+                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("Layer adjustments"),
+                                contents: bytemuck::bytes_of(&parameters),
+                                usage: wgpu::BufferUsages::UNIFORM,
+                            });
+                    let source = &self.sources[&layer.source.id];
+                    let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("Layer inputs"),
+                        layout: &self.composite.get_bind_group_layout(0),
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&source.view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &t.scratch[current].view,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &t.scratch[1 - current].view,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: uniform.as_entire_binding(),
+                            },
+                        ],
+                    });
+                    dispatch(&mut encoder, &self.composite, &bind, width, height);
+                    current = 1 - current;
+                }
+                let origin = self
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Tile output origin"),
+                        contents: bytemuck::cast_slice(&[x, y, u32::from(empty), 0]),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    });
+                let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Display and export"),
+                    layout: &self.encode.get_bind_group_layout(0),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&t.scratch[current].view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&t.display.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&t.export.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: origin.as_entire_binding(),
+                        },
+                    ],
                 });
-            let source = &self.sources[&layer.source.id];
-            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Layer inputs"),
-                layout: &self.composite.get_bind_group_layout(0),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&source.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&t.scratch[current].view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&t.scratch[1 - current].view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: uniform.as_entire_binding(),
-                    },
-                ],
-            });
-            dispatch(&mut encoder, &self.composite, &bind, t.width, t.height);
-            current = 1 - current;
+                dispatch(&mut encoder, &self.encode, &bind, width, height);
+                t.tiles[index] = keys;
+            }
         }
-        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Display and export"),
-            layout: &self.encode.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&t.scratch[current].view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&t.display.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&t.export.view),
-                },
-            ],
-        });
-        dispatch(&mut encoder, &self.encode, &bind, t.width, t.height);
-        self.queue.submit([encoder.finish()]);
-        self.renders += 1;
+        if changed > 0 {
+            self.queue.submit([encoder.finish()]);
+            self.renders += 1;
+            self.tiles_rendered += changed;
+        }
         self.render_valid = true;
         Ok(resized)
     }

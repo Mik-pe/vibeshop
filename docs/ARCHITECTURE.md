@@ -8,7 +8,7 @@ The document stores bottom-to-top raster layers sharing immutable source pixels 
 
 Saved-state identity is separate from render revision. Undo/redo restores prior state identities while render revisions increase. Saving marks only the snapshot actually written, so later edits remain dirty. The saved marker retains no extra source pixels. Open results check the requested revision before replacing the active document; late results require an explicit decision. Save/discard/cancel protects dirty document replacement and closing. PNG export is never an editable save. See [project format and limits](PROJECT_FORMAT.md).
 
-Source pixels are uploaded once per active source identity. Interactive color adjustment and compositing happens in WGSL. Two RGBA16F scratch textures ping-pong through visible layers, then a final pass produces display and export textures. This is a straightforward layer loop, not a speculative graph compiler. Dirty tiles and resource budgets are the next scaling work, not a second renderer.
+Source pixels are uploaded once per active source identity. Interactive color adjustment and compositing happens in WGSL. Two reusable 512×512 RGBA16F scratch textures ping-pong through layers intersecting a dirty tile, then a final pass updates that region of the display and export textures. Ordered per-tile signatures track source identity and pixel-affecting layer settings, including old/new bounds after movement. Unchanged tiles are reused. Sources and output textures are still full-image allocations; bounded residency and streaming export remain scaling work.
 
 ## Color and alpha contract
 
@@ -22,7 +22,7 @@ Display and PNG are produced from the same composition. Export copies that revis
 
 Limits are 8192px per dimension, 16 megapixels per image, 16 layers, 64 MiB encoded image input and 128 MiB of distinct retained source pixels. Undo retains at most 32 entries and evicts oldest entries to respect its source budget. These are not total process/GPU memory guarantees: composition targets, active IO snapshots and staging buffers add memory. GPU allocation failure/device loss and very large documents need further hardening.
 
-At 16 megapixels, two 16F targets plus two RGBA8 outputs alone use about 384 MiB. A tiled renderer must replace whole-image targets before large-document support is claimed. Do not raise limits without measuring memory and interaction latency.
+At the maximum 16,777,216 pixels, two RGBA8 outputs plus the reusable 16F scratch tiles have a 132 MiB texture payload, excluding sources, driver overhead and readback. Full-image sources, output targets and export staging still prevent a large-document guarantee. Do not raise limits without bounding those allocations and measuring memory and interaction latency. See [the compositor workload](RENDERING_PERFORMANCE.md) for reproducible measurements and their limits.
 
 Performance targets on named reference hardware: no composition/uploads during pan or zoom; no unnecessary idle redraw loop; input-to-visible-edit p95 below 16.7ms for an agreed workload; bounded allocations and no full-image CPU copies per slider tick. These are targets, not results. Report resolution, layers, adapter, backend, build mode, warm-up, sample count, p50/p95 and peak memory.
 

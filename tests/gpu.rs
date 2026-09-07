@@ -83,3 +83,75 @@ fn tone_controls_produce_expected_pixels() {
     d.layers[0].reset_adjustments();
     close(&render(&mut e, &d), &[255, 0, 0, 128]);
 }
+
+#[test]
+fn tiles_preserve_seams_and_only_recompute_changed_layer_bounds() {
+    let mut e = engine();
+    let mut d = Document::new(layer([60, 120, 210, 128], 1027, 515));
+    let mut patch = layer([200, 90, 50, 192], 17, 13);
+    patch.offset = [505, 505];
+    d.layers.push(patch);
+    let before = render(&mut e, &d);
+    let initial_tiles = e.tiles_rendered;
+    assert_eq!(initial_tiles, 6);
+    assert_eq!(render(&mut e, &d), before);
+    assert_eq!(e.tiles_rendered, initial_tiles);
+    d.layers[1].name = "Renaming does not change pixels".into();
+    assert_eq!(render(&mut e, &d), before);
+    assert_eq!(e.tiles_rendered, initial_tiles);
+    d.layers[1].exposure = 0.5;
+    let edited = render(&mut e, &d);
+    assert_eq!(e.tiles_rendered - initial_tiles, 4);
+    assert_eq!(e.uploads, 2);
+    // Compare the boundary-crossing area to an equivalent small composition.
+    let mut reference = Document::new(layer([60, 120, 210, 128], 25, 20));
+    reference.layers.push(d.layers[1].clone());
+    reference.layers[1].offset = [5, 5];
+    let small = render(&mut engine(), &reference);
+    for y in 0..15 {
+        for x in 0..25 {
+            let at = ((y + 500) * 1027 + x + 500) * 4;
+            let expected = (y * 25 + x) * 4;
+            close(&edited[at..at + 4], &small[expected..expected + 4]);
+        }
+    }
+    let tiles = e.tiles_rendered;
+    d.layers[1].offset = [-8, -4];
+    let moved = render(&mut e, &d);
+    assert_eq!(e.tiles_rendered - tiles, 4);
+    assert_ne!(moved, edited);
+    // A fresh render must agree with cached tiles after move, hide and deletion.
+    assert_eq!(moved, render(&mut engine(), &d));
+    d.layers[1].visible = false;
+    assert_eq!(render(&mut e, &d), render(&mut engine(), &d));
+    d.layers.pop();
+    assert_eq!(render(&mut e, &d), render(&mut engine(), &d));
+}
+
+#[test]
+fn tile_cache_tracks_blend_order_resize_and_failed_render() {
+    let mut e = engine();
+    let mut d = Document::new(layer([80, 100, 200, 192], 513, 513));
+    d.layers.push(layer([200, 100, 40, 128], 513, 513));
+    for blend in [Blend::Normal, Blend::Multiply, Blend::Screen] {
+        d.layers[1].blend = blend;
+        let result = render(&mut e, &d);
+        let mut small = Document::new(layer([80, 100, 200, 192], 1, 1));
+        small.layers.push(layer([200, 100, 40, 128], 1, 1));
+        small.layers[1].blend = blend;
+        let expected = render(&mut engine(), &small);
+        for pixel in result.as_chunks::<4>().0 {
+            close(pixel, &expected);
+        }
+    }
+    d.layers.swap(0, 1);
+    assert_eq!(render(&mut e, &d), render(&mut engine(), &d));
+    d.width = 0;
+    assert!(e.render(&d).is_err());
+    assert!(e.readback().is_err());
+    d.width = 513;
+    assert_eq!(render(&mut e, &d), render(&mut engine(), &d));
+    d.width = 17;
+    d.height = 11;
+    assert_eq!(render(&mut e, &d), render(&mut engine(), &d));
+}
