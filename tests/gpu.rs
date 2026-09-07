@@ -155,3 +155,48 @@ fn tile_cache_tracks_blend_order_resize_and_failed_render() {
     d.height = 11;
     assert_eq!(render(&mut e, &d), render(&mut engine(), &d));
 }
+
+#[test]
+fn nonuniform_source_coordinates_survive_tile_boundaries_and_replacement() {
+    let (width, height) = (1027, 515);
+    let mut pixels = Vec::new();
+    for y in 0..height {
+        for x in 0..width {
+            pixels.extend_from_slice(&[
+                (x % 251) as u8,
+                (y % 241) as u8,
+                ((x / 251 * 53 + y / 241 * 17) % 256) as u8,
+                if x % 7 == 0 { 0 } else { 192 },
+            ]);
+        }
+    }
+    let mut d = Document::new(Layer::new(
+        "Generated spatial fixture",
+        Source::new(width, height, pixels.clone()).unwrap(),
+    ));
+    let mut e = engine();
+    let result = render(&mut e, &d);
+    for (actual, expected) in result
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(pixels.as_chunks::<4>().0)
+    {
+        close(actual, if expected[3] == 0 { &[0; 4] } else { expected });
+    }
+    for p in pixels.as_chunks_mut::<4>().0 {
+        p[0] = 255 - p[0];
+    }
+    d.layers[0].source = Source::new(width, height, pixels.clone()).unwrap();
+    let replacement = render(&mut e, &d);
+    assert_eq!(e.uploads, 2);
+    assert_eq!(e.tiles_rendered, 12);
+    for (actual, expected) in replacement
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(pixels.as_chunks::<4>().0)
+    {
+        close(actual, if expected[3] == 0 { &[0; 4] } else { expected });
+    }
+}
