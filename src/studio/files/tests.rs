@@ -42,6 +42,7 @@ fn studio() -> (Studio, egui::Context) {
             move_start: None,
             job: None,
             pending: None,
+            icons_checked: true,
             allow_close: false,
             status: String::new(),
             error: None,

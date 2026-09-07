@@ -3,6 +3,7 @@ use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
 use std::{path::PathBuf, sync::mpsc::Receiver};
 
 mod files;
+mod icons;
 #[cfg(test)]
 mod ui_tests;
 mod workspace;
@@ -42,6 +43,7 @@ pub struct Studio {
     project_path: Option<PathBuf>,
     new_size: Option<[u32; 2]>,
     startup: Option<PathBuf>,
+    icons_checked: bool,
 }
 impl Studio {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Result<Self> {
@@ -84,6 +86,7 @@ impl Studio {
             project_path: None,
             new_size: None,
             startup,
+            icons_checked: false,
         }
     }
     fn render(&mut self) -> bool {
@@ -296,6 +299,11 @@ impl Studio {
             });
     }
     fn show(&mut self, ctx: &egui::Context) {
+        if !self.icons_checked {
+            // Fonts only exist inside a pass; run this on the first frame.
+            icons::assert_all_render(ctx);
+            self.icons_checked = true;
+        }
         self.poll_job(ctx);
         if let Some(path) = self.startup.take() {
             self.request(Action::Open(Some(path), false), ctx);

@@ -62,7 +62,7 @@ capture redone
 xdotool key --clearmodifiers ctrl+z
 sleep 0.3
 # Exposure track in the 1440x940 compact workspace, right of its neutral midpoint.
-xdotool mousemove --sync --window "$window" 1330 219
+xdotool mousemove --sync --window "$window" 1330 249
 sleep 0.1
 xdotool mousedown 1
 sleep 0.15
